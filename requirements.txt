@@ -1,0 +1,6 @@
+# Parser dependencies. Text formats (markdown, html) are stdlib-only and need
+# nothing here. Binary OOXML formats use well-established, MIT-licensed libraries.
+openpyxl>=3.1      # xlsx
+python-docx>=1.1   # docx
+python-pptx>=0.6   # pptx
+# pdf: deferred — a separate strategy will be decided later.

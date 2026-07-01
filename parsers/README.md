@@ -17,3 +17,8 @@ Notlar:
   üretimi `tables/` modülünün işi.
 - Görsel geçen yerlere `<imageN>` gibi bir işaret konur; işaretin doldurulması `images/`
   modülünün işi.
+- Listeler ayrı bir konteyner blok değildir: IR düz bir blok akışıdır, liste üyeliği sıradan
+  bloklara metadata olarak yazılır (`list_id` / `list_level` / `list_ordered`). Böylece bir
+  liste öğesinin içindeki tablo/görsel gerçek bir `TableBlock`/`ImageBlock` olarak korunur
+  (düz metne ezilmez); bu, docx (`w:numId`/`w:ilvl`) ve pdf'in listeyi sakladığı yapıyla da
+  hizalıdır. Bir "liste", aynı `list_id`'yi paylaşan bloklar gruplanarak yeniden kurulur.
