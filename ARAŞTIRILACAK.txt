@@ -1,0 +1,2 @@
+ARAŞTIRILACAK:
+raptor yaklaşımı: collapsed tree vs tree traversal

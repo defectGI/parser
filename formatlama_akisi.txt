@@ -1,0 +1,62 @@
+ham veri - klasörde girdi, işlem bitince de korunacak.
+parse edilmiş hal - bir ara output, klasörde.
+chunklar - hem klasör çıktısı hem de sqlite'da.
+sqlite'da chunkların tutulacakları:
+	SIRALI / YAPISAL EKSEN
+  	  chunk_id
+  	  chunk_index
+  	  node_parent_id
+	  next_chunk_id
+  	  prev_chunk_id
+  	  node_id (başlıklanmayan metin için null)
+  	  paragraph_id (belirlenemeyen metin için null)
+
+	İÇERİK / KONUM
+	  content
+	  content_sha256
+	  byte_range
+	  page_range
+	  language
+	  token_count
+
+	RAPTOR EKSENİ
+	  raptor_layer
+	  raptor_children_ids
+	  raptor_parent_id
+	  raptor_cluster_id
+	  raptor_is_summary
+	  raptor_summary_weight
+	  access_level
+		
+parsing:
+	Microsoft markitdown kütüphanesinden vazgeçtim. Orijinal doküman byte offset eksikliği var.
+	parsers/
+	  base.py BaseParser + ParsedDocument
+	  docx_parser.py
+	  pptx_parser.py
+	  xlsx_parser.py
+	  html_parser.py
+	  markdown_parser.py
+	  registry.py
+
+image handling:
+	parse sırasında <image1> (mark to be determined) işaret konur. o dosyanın parse'ı bitince image_handler.py çağırılır.
+	image_handler parse edilmiş dokümandaki image tagına karşılık gelen görseli alır. OCR'a sokar. Anlamlı bir sonuç çıkıp çıkmadığı küçük bir ocr_output_control.py ile LLM'e sorulur. Yazım hataları ve format bozulmaları düzeltilir.
+	Anlamlı sonuç parse edilen dosyada yerine yazılır.
+	Anlamlı veya anlamsız fark etmeksizin, bu görüntü ayrıyeten korunur ve içeriğinin sha256 hash'iyle (image_id) adreslenip blob store'da immutable saklanır. aynı görsel tekrar geçse tek kopya tutulur (dedup).
+	her görüntü için SQLite'ta kayıt açılır:
+	image_id
+	doc_id
+	locator (dokümandaki konum)
+	ocr_text
+	ocr_meaningful (bayrak)
+	mime
+	width / height
+	access_level (dokümandan miras)
+
+	ham byte IR'ye gömülmez, sadece referansla taşınır.
+	OCR anlamlıysa: düzeltilmiş metin parse çıktısında işaretin yerine yazılır + image_id'li text chunk olarak Qdrant'a gider, aranabilir olur.
+	OCR anlamsızsa: işaret kaldırılır, metin indekslenmez (gürültü engellenir), ama blob + SQLite kaydı korunur.
+
+TABLOLAR WAITING...
+
