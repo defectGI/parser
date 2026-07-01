@@ -27,6 +27,9 @@ sqlite'da chunkların tutulacakları:
 	  raptor_is_summary
 	  raptor_summary_weight
 	  access_level
+	
+	DOKÜMAN BAZLI PROJE-SPESİFİK
+	  
 		
 parsing:
 	Microsoft markitdown kütüphanesinden vazgeçtim. Orijinal doküman byte offset eksikliği var.
@@ -36,8 +39,12 @@ parsing:
 	  pptx_parser.py
 	  xlsx_parser.py
 	  html_parser.py
+	  pdf_parser.py
 	  markdown_parser.py
 	  registry.py
+pdf_parser.py için dikkate alınacak özel durumlar:
+	
+
 
 image handling:
 	parse sırasında <image1> (mark to be determined) işaret konur. o dosyanın parse'ı bitince image_handler.py çağırılır.
@@ -58,5 +65,28 @@ image handling:
 	OCR anlamlıysa: düzeltilmiş metin parse çıktısında işaretin yerine yazılır + image_id'li text chunk olarak Qdrant'a gider, aranabilir olur.
 	OCR anlamsızsa: işaret kaldırılır, metin indekslenmez (gürültü engellenir), ama blob + SQLite kaydı korunur.
 
-TABLOLAR WAITING...
 
+tablolar:
+	xlsx, docx, pptx, html kendi tablo yapılarına sahip. JSON için structured çıkacak. 
+	Merged rows/cols için "merges": [{"row": 0, "col": 0, "rowspan": 1, "colspan": 2}] tutulacak tablo yapısında.
+	Tablelar dosya içinde tam formatlanmış json olarak tutulacak.
+ 	Tablo bloğunda table_description bloğu olacak ve içeriği table_describe.py ile tutulacak.
+	table_describe.py, tablonun formatlı içeriğine ve önünde/arkasındaki içeriğe göre tablonun kısa açıklaması ve neleri gösterdiğini yazacak.
+	Tablo ve sonuç llm checke girecek. Geçmeyenler 3 kez retry döngüsüne girip düzelmezse işaretlenecek.
+
+		
+
+geliştirici için bir web arayüzü olmalı. bu arayüz tüm süreci çok net açıkalyacak şekilde adım adım süreci göstermeli.
+sonuçlar bu arayüzde gezilerek incelenebilmeli, bağlantılar tıklanarak görülebilmeli. Mesela bir image ona refer eden yazıya tıklayınca oraya yönlenebiliriz.
+bir de dur kalk modu olacak. parserın her aşaması başlamak için bir butona tıklanmayı bekleyecek, o aşama bitince duracak ve sonuçlar görülecek, o butona tekrar baılınca sonraki aşamaya geçilecek.
+buradaki tasarım sade, pek renkli değil, net, temiz ve açıklayıcı olmalı.
+
+	
+
+
+
+
+
+
+
+	
