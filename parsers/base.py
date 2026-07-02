@@ -2,7 +2,7 @@
 
 This module is the parser's single "contract" file: every format parser produces
 a `ParsedDocument` (IR), and all later stages (images/, tables/, webapp/) read and
-enrich this IR. The IR is stored as JSON under `storage/parsed/*.json`.
+enrich this IR. The IR is stored as JSON under `storage/output/*.json`.
 
 Design decisions
 ----------------
@@ -17,7 +17,8 @@ Design decisions
   (the webapp's navigation requirement). At parse time `image_id`/`ocr_text`/
   `ocr_meaningful` are None; the images/ stage fills them.
 * Tables are fully structured JSON including merges. `table_description` is kept in
-  the IR; the LLM-check status / retry counter lives in `storage/db/` (not here).
+  the IR (on TableBlock); the LLM-check status/retry state will likewise live in the
+  IR when the tables/ stage adds it — there is no separate database.
 * Lists are NOT a container block. The IR stays a flat block stream; list membership
   is metadata on ordinary blocks (`list_id`/`list_level`/`list_ordered`). This mirrors
   how docx (w:numId/w:ilvl) and pdf natively store lists, and keeps block-level content
@@ -253,22 +254,29 @@ class ParagraphBlock(Block):
 @dataclass
 class TableBlock(Block):
     table: TableData = field(default_factory=lambda: TableData(0, 0))
-    # Filled by tables/table_describe.py; None at parse time.
+    # Filled by tables/table_describe.py; all None at parse time.
     table_description: str | None = None
+    # LLM-check outcome (no separate DB): "ok" | "flagged" | None (check not run).
+    describe_status: str | None = None
+    describe_attempts: int | None = None
 
     type: BlockType = field(init=False, default=BlockType.TABLE)
 
     def to_dict(self) -> dict[str, Any]:
         d = {**self._base_dict(), "table": self.table.to_dict()}
-        if self.table_description is not None:
-            d["table_description"] = self.table_description
+        for key in ("table_description", "describe_status", "describe_attempts"):
+            val = getattr(self, key)
+            if val is not None:
+                d[key] = val
         return d
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> "TableBlock":
         return cls(**cls._base_kwargs(data),
                    table=TableData.from_dict(data["table"]),
-                   table_description=data.get("table_description"))
+                   table_description=data.get("table_description"),
+                   describe_status=data.get("describe_status"),
+                   describe_attempts=data.get("describe_attempts"))
 
 
 @dataclass
@@ -349,7 +357,7 @@ class ParsedDocument:
     """Parser output: the common intermediate representation (IR).
 
     doc_id
-        Document identifier (assigned by the pipeline). `storage/parsed/{doc_id}.json`.
+        Document identifier (assigned by the pipeline). `storage/output/{doc_id}.json`.
     source_path
         Path/name of the raw input under `storage/raw/` (provenance).
     fmt
