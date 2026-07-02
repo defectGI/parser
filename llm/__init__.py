@@ -5,7 +5,8 @@ Public surface:
     LLMError    - raised on any model/transport failure
     get_client  - build a client from environment configuration
 
-Environment:
+Environment (read from the real environment, then from a `.env` file at the repo
+root if present — real environment variables always win):
     LLM_PROVIDER   "openai" (default, any OpenAI-compatible server) | "anthropic"
     LLM_MODEL      model id (required for openai; defaults to opus for anthropic)
     LLM_BASE_URL   API root, required for the openai provider (e.g. .../v1)
@@ -17,6 +18,8 @@ from __future__ import annotations
 
 import os
 
+from dotenv import load_dotenv
+
 from .base import LLMClient, LLMError
 
 __all__ = ["LLMClient", "LLMError", "get_client"]
@@ -24,6 +27,7 @@ __all__ = ["LLMClient", "LLMError", "get_client"]
 
 def get_client() -> LLMClient:
     """Construct an `LLMClient` from `LLM_*` environment variables."""
+    load_dotenv()  # no-op if there's no .env file; never overrides a set env var
     provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
     model = os.getenv("LLM_MODEL") or None
     api_key = os.getenv("LLM_API_KEY") or None

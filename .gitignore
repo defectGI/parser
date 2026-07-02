@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+docling_test/.venv/
+docling_test/samples/
+docling_test/output/
+review/

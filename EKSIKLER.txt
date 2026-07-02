@@ -1,0 +1,86 @@
+EKSIKLER
+========
+corpus_docx/ uzerinde test.py ile yapilan toplu docx + tablo testinde bulunan,
+henuz cozulmemis eksikler/bug'lar. Her madde: nerede, neden, hangi dosyada
+gorulduu.
+
+1. OMML (Office Math) formulleri tablo hucrelerinde kayboluyor
+   ------------------------------------------------------------
+   Nerede: parsers/docx_parser.py, _cell_text() (~satir 45-46)
+   Neden: _cell_text sadece qn("w:t") (duz metin run'lari) okuyor. Word'de
+          denklemler <m:oMathPara>/<m:oMath> icinde <m:r>/<m:t> (math
+          namespace) olarak saklaniyor; bu elementler w:t degil, dolayisiyla
+          hic yakalanmiyor ve hucre bos donuyor.
+   Etki: Formul iceren tablo hucresi TableData.cells'te "" (bos) oluyor;
+         formulun kendisi (orn. nabla/gradyan operatorlu bir denklem, unicode
+         ∇ iceriyor) IR'a hic girmiyor. table_describe LLM'e de bos
+         hucre gidiyor, aciklamalar bu yuzden anlamsiz/yanlis cikiyor
+         (orn: "the second holds the text (1)" - aslinda (1) sadece denklem
+         numarasi, denklemin kendisi kayip).
+   Gorulen dosya: 52156e6ece2fc309f473e00d1b304718df017634e15eb7607fd08d7ae2b8760d
+     (CFD/akademik makale, en az 12 tablo b13,b15,b21,b25,b27,b30,b32,b34,
+      b41,b47,b49,b62 - hepsi ayni patern: [bos, bos-olmasi-gereken-formul,
+      "(N)"] seklinde 1 satirlik "denklem tablosu")
+   Cozum onerisi (henuz uygulanmadi): _cell_text icinde w:t yaninda m:t
+   (math namespace) elementlerini de toplamak; en azindan duz-metin
+   yaklasik gosterimi (orn. "∇" + operand harfleri) kurtarilabilir, tam
+   LaTeX/MathML donusumu ayri bir konu.
+
+2. Ic ice (nested) tablolar duzlesip karisiyor
+   --------------------------------------------
+   Nerede: parsers/docx_parser.py, _cell_text() (~satir 45-46)
+   Neden: Bir tablo hucresinin icinde baska bir w:tbl varsa (nested table),
+          _cell_text yine tc.iter(qn("w:t")) ile TUM torun w:t'leri topluyor;
+          ic tablonun kendi satir/sutun sinirlari yok sayilip hepsi tek bir
+          string'de art arda birlesiyor. Disaridaki tablo TableBlock olarak
+          cikiyor ama ic tablo kendi TableBlock'u olarak hic olusmuyor.
+   Etki: Ic tablonun basliklari ile veri hucreleri ayirt edilemez sekilde
+         birbirine karisiyor, orn:
+         "FundDeptTypeLineLine Name Amount Requested 1000012300002State
+          Conference & Travel$695.50 Total$695.50"
+         Bu, header/deger eslesmesini imkansiz kilan, kullanilamaz bir metin.
+   Gorulen dosya: bd56a6ff3e08992fc3331cfca61515507c00cf96f38e771fbfaa4c487af1039d
+     (ham dokumanda 12 w:tbl var, IR'da 10 TableBlock - 2 tablo digerinin
+      hucresine gomulu oldugu icin ayri blok olarak hic cikmiyor)
+   Cozum onerisi (henuz uygulanmadi): _build_docx_table hucre icinde nested
+   w:tbl gorurse, o hucreyi ayri bir ic-TableBlock olarak isaretlemeli (veya
+   en azindan hucreler arasina ayirici koyup satir/sutun sinirini korumali).
+
+3. Eski tip (VML/OLE) gomulu nesneler tamamen goz ardi ediliyor
+   --------------------------------------------------------------
+   Nerede: parsers/docx_parser.py, DocxParser._para_content() (~satir 307-328)
+   Neden: Gorsel tespiti sadece DrawingML'deki a:blip (r:embed) elementini
+          ariyor. Eski Office surumlerinden kalma / donusturulmus belgelerde
+          gorseller VML ile <o:OLEObject>+<v:shape><v:imagedata r:id=.../>
+          seklinde gomulu olabiliyor; bu yapı a:blip degil, dolayisiyla hic
+          yakalanmiyor.
+   Etki: Belgede gercek bir raster onizlemesi (word/media/imageN.png) mevcut
+         olmasina ragmen ne ImageBlock ne <imageN> marker olusuyor - gorsel
+         IR'a hic girmiyor, konumunda bos bir paragraf bile kalmiyor (paragraf
+         metni zaten bostu).
+   Gorulen dosya: 2325a31a5b90f7a6df428f604b1c0a28d1a29b9ad712cadbd83869a0a07e590c
+     (o:OLEObject ProgID="MSPhotoEd.3", raster onizleme word/media/image1.png
+      olarak mevcut ama v:imagedata r:id="rId7" uzerinden erisiliyor, a:blip
+      degil)
+   Cozum onerisi (henuz uygulanmadi): _para_content'e v:imagedata/@r:id icin
+   de bir dal eklemek; iliskiyi ayni document.part.related_parts ile cozup
+   ImageBlock uretmek.
+
+4. Tablo hucreleri icindeki gorseller sessizce kayboluyor
+   --------------------------------------------------------
+   Nerede: parsers/docx_parser.py, DocxParser.parse() (~satir 250-273) ve
+           _build_docx_table()/_cell_text() (~satir 45-101)
+   Neden: Gorsel cikarma (_para_content, dolayisiyla ImageBlock uretimi)
+          sadece body seviyesindeki paragraflarda (items listesi) cagriliyor.
+          Tablo hucreleri _build_docx_table -> _cell_text ile isleniyor ve bu
+          fonksiyon sadece duz metin donduruyor; hucre icindeki a:blip'ler
+          (goreseller) hic islenmiyor.
+   Etki: Tablo hucresine gomulu bir gorsel duz metne hic yansimiyor, ImageBlock
+         da olusmuyor - gorsel IR'dan tamamen dusuyor, iz birakmiyor.
+   Gorulen dosya: d0e3e1de552a9eed97744a771309fdc99baf46271052800c43bcaccb6d7c679e
+     (belgenin tek TableBlock'unun bir hucresinde a:blip var; ham dosyada
+      1 blip olmasina ragmen IR'da images=0)
+   Cozum onerisi (henuz uygulanmadi): _cell_text (veya _build_docx_table)
+   hucre icindeki a:blip'leri de tespit edip <imageN> marker + ImageBlock
+   uretecek sekilde genisletilmeli (docx img_n sayacinin body ve tablo
+   gecisleri arasinda paylasilmasi gerekir).
