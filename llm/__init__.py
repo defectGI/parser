@@ -37,14 +37,27 @@ def get_client() -> LLMClient:
 
         return AnthropicClient(model=model, api_key=api_key)
 
-    if provider in ("openai", "openai-compat", "openai_compatible", "local"):
-        base_url = os.getenv("LLM_BASE_URL")
+    # Known OpenAI-compatible hosts get a default base URL so LLM_BASE_URL is optional.
+    _COMPAT_DEFAULT_URL = {"openrouter": "https://openrouter.ai/api/v1"}
+    if provider in ("openai", "openai-compat", "openai_compatible", "local",
+                    "openrouter"):
+        base_url = os.getenv("LLM_BASE_URL") or _COMPAT_DEFAULT_URL.get(provider)
         if not base_url:
             raise LLMError("LLM_BASE_URL is required for the openai provider")
         if not model:
             raise LLMError("LLM_MODEL is required for the openai provider")
         from .openai_compat import OpenAICompatClient
 
-        return OpenAICompatClient(base_url=base_url, model=model, api_key=api_key)
+        # OpenRouter reasoning models hide their answer behind a "reasoning" field
+        # and can burn the whole token budget thinking, leaving content empty on
+        # short-answer tasks. Disable it by default; set LLM_REASONING=1 to keep it.
+        extra_body: dict = {}
+        reasoning_on = os.getenv("LLM_REASONING", "").strip().lower() in (
+            "1", "true", "yes", "on")
+        if provider == "openrouter" and not reasoning_on:
+            extra_body["reasoning"] = {"enabled": False}
+
+        return OpenAICompatClient(base_url=base_url, model=model, api_key=api_key,
+                                  extra_body=extra_body)
 
     raise LLMError(f"unknown LLM_PROVIDER: {provider!r}")

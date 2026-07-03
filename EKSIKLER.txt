@@ -1,8 +1,17 @@
 EKSIKLER
 ========
-corpus_docx/ uzerinde test.py ile yapilan toplu docx + tablo testinde bulunan,
-henuz cozulmemis eksikler/bug'lar. Her madde: nerede, neden, hangi dosyada
-gorulduu.
+corpus_docx/ uzerinde test.py ile yapilan toplu docx + tablo testinde bulunan
+eksikler/bug'lar. Her madde: nerede, neden, hangi dosyada gorulduu.
+
+GUNCEL DURUM (2026-07-03): 1-4 arasi maddelerin HEPSI COZULDU.
+  - Once tablo hucreleri "metin" yerine "blok listesi" (base.py Cell) olacak
+    sekilde IR degistirildi (IR_VERSION 2) -> madde 2 (nested tablo) cozuldu.
+  - Ardindan tek bir paragraf yuruteci (_walk_para) eklendi; hem govde hem
+    hucre bunu kullaniyor -> madde 1 (m:t math), 3 (VML/OLE v:imagedata),
+    4 (hucre ici a:blip gorseli) cozuldu.
+  Dogrulama: her madde kendi gercek dokumaninda test edildi + tests/ altinda
+  regresyon testleri (test_nested_tables.py, test_docx_math_images.py).
+  Ayrintili aciklamalar (kok neden / etki) referans olarak asagida birakildi.
 
 1. OMML (Office Math) formulleri tablo hucrelerinde kayboluyor
    ------------------------------------------------------------
@@ -21,7 +30,7 @@ gorulduu.
      (CFD/akademik makale, en az 12 tablo b13,b15,b21,b25,b27,b30,b32,b34,
       b41,b47,b49,b62 - hepsi ayni patern: [bos, bos-olmasi-gereken-formul,
       "(N)"] seklinde 1 satirlik "denklem tablosu")
-   Cozum onerisi (henuz uygulanmadi): _cell_text icinde w:t yaninda m:t
+   Cozum (UYGULANDI): _cell_text icinde w:t yaninda m:t
    (math namespace) elementlerini de toplamak; en azindan duz-metin
    yaklasik gosterimi (orn. "∇" + operand harfleri) kurtarilabilir, tam
    LaTeX/MathML donusumu ayri bir konu.
@@ -42,7 +51,7 @@ gorulduu.
    Gorulen dosya: bd56a6ff3e08992fc3331cfca61515507c00cf96f38e771fbfaa4c487af1039d
      (ham dokumanda 12 w:tbl var, IR'da 10 TableBlock - 2 tablo digerinin
       hucresine gomulu oldugu icin ayri blok olarak hic cikmiyor)
-   Cozum onerisi (henuz uygulanmadi): _build_docx_table hucre icinde nested
+   Cozum (UYGULANDI): _build_docx_table hucre icinde nested
    w:tbl gorurse, o hucreyi ayri bir ic-TableBlock olarak isaretlemeli (veya
    en azindan hucreler arasina ayirici koyup satir/sutun sinirini korumali).
 
@@ -62,7 +71,7 @@ gorulduu.
      (o:OLEObject ProgID="MSPhotoEd.3", raster onizleme word/media/image1.png
       olarak mevcut ama v:imagedata r:id="rId7" uzerinden erisiliyor, a:blip
       degil)
-   Cozum onerisi (henuz uygulanmadi): _para_content'e v:imagedata/@r:id icin
+   Cozum (UYGULANDI): _para_content'e v:imagedata/@r:id icin
    de bir dal eklemek; iliskiyi ayni document.part.related_parts ile cozup
    ImageBlock uretmek.
 
@@ -80,7 +89,78 @@ gorulduu.
    Gorulen dosya: d0e3e1de552a9eed97744a771309fdc99baf46271052800c43bcaccb6d7c679e
      (belgenin tek TableBlock'unun bir hucresinde a:blip var; ham dosyada
       1 blip olmasina ragmen IR'da images=0)
-   Cozum onerisi (henuz uygulanmadi): _cell_text (veya _build_docx_table)
+   Cozum (UYGULANDI): _cell_text (veya _build_docx_table)
    hucre icindeki a:blip'leri de tespit edip <imageN> marker + ImageBlock
    uretecek sekilde genisletilmeli (docx img_n sayacinin body ve tablo
    gecisleri arasinda paylasilmasi gerekir).
+
+
+ACIK ISLER (yeni)
+=================
+
+5. Inline formatting (kalin/egik/...) diger parser'larda doldurulmuyor
+   -------------------------------------------------------------------
+   Durum: Model KURULDU + docx UYGULANDI. base.py'de Mark enum + InlineRun
+          + text-blogunda opsiyonel `runs` alani var (kanonik `text` aynen
+          duruyor; runs sadece bicim tasiyan bloklarda dolar). Yalnizca
+          anlamsal marklar modelleniyor: bold, italic, underline, strike,
+          superscript, subscript (renk/font/highlight kozmetik -> haric).
+          docx `_walk_para` bunlari w:rPr'den okuyor.
+   Eksik: pptx / xlsx / html / markdown parser'lari `runs`'i HIC doldurmuyor;
+          bicim bilgisi bu formatlarda hala duz metne dusuyor.
+            * pptx: python-pptx run'larinda a:rPr (b/i/u) + a:t okunmali;
+                    ayni Mark set'ine map'lenmeli.
+            * html: <b>/<strong>/<i>/<em>/<u>/<s>/<sup>/<sub> su an "inline
+                    tag" olarak yok sayilip metne akiyor; mark'a cevrilmeli.
+            * markdown: **bold** / *italic* / ~~strike~~ ham metinde kaliyor;
+                    parse edilip mark'a cevrilmeli (ve isaretler metinden
+                    ayiklanmali).
+            * xlsx: hucre-ici rich text (openpyxl CellRichText) okunabilir;
+                    dusuk oncelik.
+   Ek (docx): su an SADECE dogrudan w:rPr okunuyor; paragraf/karakter STILINE
+          gomulu bold/italik (word/styles.xml) henuz cozulmuyor -> stille
+          kalin yapilmis metin `runs`'ta isaretsiz gorunur. Cozum: styles.xml
+          rPr'sini de _style_numbering'e benzer sekilde cozup miras almak.
+
+6. pptx: math (a:t/m:t) ve hucre-ici gorseller de kayip (docx paralleli)
+   ---------------------------------------------------------------------
+   Durum: docx icin 1 (math) ve 4 (hucre gorseli) cozuldu; pptx ayni kok
+          nedenle hala kayip veriyor (python-pptx cell.text / para.text math
+          ve hucre gorselini yutuyor; OLE nesneleri PICTURE shape tipi
+          olmadigi icin _picture dalina hic girmiyor).
+   Not: xlsx gorselleri (xl/drawings) hic cikarilmiyor -> ayri, daha buyuk is.
+
+
+7. HTML: nested tablo duzlestiriliyor + hucre gorseli alt-text'e iniyor
+   --------------------------------------------------------------------
+   Nerede: parsers/html_parser.py, _close_table() (nested -> parent hucreye
+           duz string) ve _image() (hucre icindeyse sadece alt text).
+   Durum: IR artik Cell.blocks ile nested tablo + hucre ImageBlock tasiyabiliyor
+          (docx'te cozuldu). HTML bu iki noktada hala "v1 limitation" davranisinda.
+   Cozum (PLANLI): docx'teki cozumun aynisini uygula -> hucre icindeki <table>'i
+          gercek TableBlock olarak Cell.blocks'a koy (duzlestirme yok); hucredeki
+          <img>'i <imageN> marker + ImageBlock olarak uret (alt-text yerine).
+   Oncelik: yuksek (html, docx'in yapisal ikizi; bu iki sorun sadece onda anlamli).
+
+8. Baslik tespiti (docx) - bilinen sinirlar
+   ----------------------------------------
+   Nerede: parsers/docx_parser.py, _classify_heading / _heading_signals.
+   (a) Kapak/roster/tarih satirlari format olarak gercek basliktan AYRILAMIYOR
+       (ROLL CALL vs STEVE BURKS ayni bold-caps-kisa). Tarih kapisi eklendi,
+       ama kapak metni + isim listeleri hala H sayilabiliyor. Saf-format
+       cozemez; context/kapak-sayfasi dedektoru gerekir (kullanici "kapaklar
+       karissa olur" dedi -> simdilik kabul).
+   (b) Baslik FP'si downstream'e sizabiliyor: table_describe breadcrumb'i
+       "Section: STEVE BURKS" verince tablo aciklamasi yanlis atif yapabiliyor.
+   (c) SADECE dogrudan run rPr/sz okunuyor; STILE gomulu bold/font (styles.xml)
+       cozulmuyor -> stille buyutulmus/kalinlastirilmis basliklar zayif skorlar
+       (item 5'teki miras sorununun ayni koku).
+   (d) Ince Title-Case alt-basliklar (bold/caps degil), belge explicit font
+       kullanmiyorsa hala kacabiliyor (font-boyutu klueyi besleyemez).
+
+9. Markdown ve PDF - kucuk/ertelenmis eksikler
+   -------------------------------------------
+   * markdown: setext basliklar (=== / ---) islenmedi (docstring'de not);
+     pipe-tablo hucresindeki ![alt](src) gorsel olarak cikarilmiyor, ham metin
+     kaliyor (ayrica item 5: **bold**/*italic* parse edilmeli).
+   * pdf: parsers/pdf_parser.py hala stub; strateji netlesince yazilacak.

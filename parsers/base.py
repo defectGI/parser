@@ -25,6 +25,12 @@ Design decisions
   inside a list item (a table/image in a `<li>`) as a real TableBlock/ImageBlock instead
   of flattening it away. A "list" is reconstructed by grouping blocks that share a
   `list_id`.
+* Inline formatting is additive, not a new tree. A text block keeps its plain `text`
+  (the canonical view every consumer already uses) and gains an OPTIONAL `runs` list
+  of `InlineRun`s carrying semantic marks (bold/italic/underline/strike/super/sub);
+  `"".join(r.text for r in runs) == text`. Unformatted blocks store no `runs` (no JSON
+  bloat). Only semantic marks are modeled — super/subscript because flattening them
+  corrupts meaning (x² vs x2). Populated by docx; other parsers pending (see EKSIKLER).
 """
 
 from __future__ import annotations
@@ -37,7 +43,10 @@ from pathlib import Path
 from typing import Any
 
 # IR schema version. Bump when the contract changes; readers migrate accordingly.
-IR_VERSION = 1
+# v2: a table cell is no longer a bare string but a `Cell` (list of blocks), so a
+# cell can hold nested tables/paragraphs losslessly. Readers still accept v1 (a
+# cell serialized as a plain string) — see `_cell_from_dict`.
+IR_VERSION = 2
 
 
 class BlockType(str, Enum):
@@ -119,22 +128,26 @@ class TableData:
     """Structured table content.
 
     cells
-        Row-major 2D matrix; each cell is text or None (cells covered by a merge).
-        `n_rows`/`n_cols` are the logical dimensions.
+        Row-major 2D matrix; each entry is a `Cell` (its content is a list of
+        blocks) or None for a slot covered by a merge. `n_rows`/`n_cols` are the
+        logical dimensions. A cell is block-structured rather than plain text so a
+        table nested inside a cell is preserved losslessly; use `Cell.plain_text()`
+        for a flat text view.
     merges
         Merge regions; the top-left cell carries the content.
     """
 
     n_rows: int
     n_cols: int
-    cells: list[list[str | None]] = field(default_factory=list)
+    cells: list[list["Cell | None"]] = field(default_factory=list)
     merges: list[Merge] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "n_rows": self.n_rows,
             "n_cols": self.n_cols,
-            "cells": self.cells,
+            "cells": [[c.to_dict() if c is not None else None for c in row]
+                      for row in self.cells],
             "merges": [m.to_dict() for m in self.merges],
         }
 
@@ -143,9 +156,76 @@ class TableData:
         return cls(
             n_rows=data["n_rows"],
             n_cols=data["n_cols"],
-            cells=data.get("cells", []),
+            cells=[[_cell_from_dict(c) for c in row]
+                   for row in data.get("cells", [])],
             merges=[Merge.from_dict(m) for m in data.get("merges", [])],
         )
+
+
+# ---------------------------------------------------------------------------
+# Inline text formatting
+# ---------------------------------------------------------------------------
+
+
+class Mark(str, Enum):
+    """An inline character style. `str`-based so it serializes to a plain string.
+
+    Only *semantic* styles are modeled — ones that can change meaning, not pure
+    cosmetics (color, font, highlight). SUPERSCRIPT/SUBSCRIPT matter because
+    flattening them corrupts text (x2 vs x², H2O vs H₂O).
+    """
+
+    BOLD = "bold"
+    ITALIC = "italic"
+    UNDERLINE = "underline"
+    STRIKE = "strike"
+    SUPERSCRIPT = "superscript"
+    SUBSCRIPT = "subscript"
+
+
+@dataclass
+class InlineRun:
+    """A maximal text span sharing the same set of active marks.
+
+    A text block keeps its plain `text` as the canonical view (unchanged for every
+    text-only consumer); `runs` is an *optional* parallel detail whose concatenated
+    text equals `text`. A run with no marks is just unstyled text.
+    """
+
+    text: str
+    marks: tuple[Mark, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"text": self.text, "marks": [m.value for m in self.marks]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "InlineRun":
+        return cls(text=data.get("text", ""),
+                   marks=tuple(Mark(m) for m in data.get("marks", [])))
+
+
+def runs_have_marks(runs: list[InlineRun]) -> bool:
+    """True if any run carries formatting (else `runs` is redundant with `text`)."""
+    return any(r.marks for r in runs)
+
+
+def finalize_runs(runs: list[InlineRun]) -> list[InlineRun]:
+    """Merge adjacent runs with identical marks, drop empties, and strip the
+    leading/trailing whitespace of the whole sequence so that
+    `"".join(r.text for r in result)` equals the block's stripped plain text."""
+    merged: list[InlineRun] = []
+    for r in runs:
+        if not r.text:
+            continue
+        if merged and merged[-1].marks == r.marks:
+            merged[-1] = InlineRun(merged[-1].text + r.text, r.marks)
+        else:
+            merged.append(InlineRun(r.text, r.marks))
+    if merged:
+        merged[0] = InlineRun(merged[0].text.lstrip(), merged[0].marks)
+        merged[-1] = InlineRun(merged[-1].text.rstrip(), merged[-1].marks)
+        merged = [r for r in merged if r.text]
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -225,30 +305,42 @@ class Block:
 class HeadingBlock(Block):
     text: str = ""
     level: int = 1  # 1 = top-level heading
+    # Optional inline formatting detail; empty => no formatting captured/present.
+    runs: list[InlineRun] = field(default_factory=list)
 
     type: BlockType = field(init=False, default=BlockType.HEADING)
 
     def to_dict(self) -> dict[str, Any]:
-        return {**self._base_dict(), "text": self.text, "level": self.level}
+        d = {**self._base_dict(), "text": self.text, "level": self.level}
+        if self.runs:
+            d["runs"] = [r.to_dict() for r in self.runs]
+        return d
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> "HeadingBlock":
         return cls(**cls._base_kwargs(data),
-                   text=data.get("text", ""), level=data.get("level", 1))
+                   text=data.get("text", ""), level=data.get("level", 1),
+                   runs=[InlineRun.from_dict(r) for r in data.get("runs", [])])
 
 
 @dataclass
 class ParagraphBlock(Block):
     text: str = ""
+    # Optional inline formatting detail; empty => no formatting captured/present.
+    runs: list[InlineRun] = field(default_factory=list)
 
     type: BlockType = field(init=False, default=BlockType.PARAGRAPH)
 
     def to_dict(self) -> dict[str, Any]:
-        return {**self._base_dict(), "text": self.text}
+        d = {**self._base_dict(), "text": self.text}
+        if self.runs:
+            d["runs"] = [r.to_dict() for r in self.runs]
+        return d
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> "ParagraphBlock":
-        return cls(**cls._base_kwargs(data), text=data.get("text", ""))
+        return cls(**cls._base_kwargs(data), text=data.get("text", ""),
+                   runs=[InlineRun.from_dict(r) for r in data.get("runs", [])])
 
 
 @dataclass
@@ -345,6 +437,123 @@ _BLOCK_CLASSES: dict[BlockType, type[Block]] = {
     BlockType.TABLE: TableBlock,
     BlockType.IMAGE: ImageBlock,
 }
+
+
+# ---------------------------------------------------------------------------
+# Table cell content
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Cell:
+    """Content of one table cell.
+
+    A cell body is structurally the same as a document body: an ordered list of
+    blocks. So a cell can legally hold a paragraph, a nested `TableBlock`, or a
+    paragraph+table+paragraph sequence — nothing about a cell is "text only".
+    Merge-covered slots are represented as None in `TableData.cells`, never as a
+    `Cell`.
+
+    Text-only consumers must not walk `blocks`; call `plain_text()` instead — it
+    is the single place that decides how a nested table degrades to text.
+    """
+
+    blocks: list[Block] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"blocks": [b.to_dict() for b in self.blocks]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Cell":
+        return cls(blocks=[Block.from_dict(b) for b in data.get("blocks", [])])
+
+    def plain_text(self) -> str:
+        """Flat text view of the cell.
+
+        Paragraph/heading blocks contribute their text; a nested table is rendered
+        inline (GitHub-flavored markdown, or `Header: value` pairs when it itself
+        contains a table); an image contributes its `<imageN>` marker. Blocks are
+        joined with newlines. This is the ONLY answer to "what if the cell holds a
+        table?" for text-only consumers.
+        """
+        parts: list[str] = []
+        images: list[ImageBlock] = []
+        for b in self.blocks:
+            if isinstance(b, TableBlock):
+                parts.append(_render_cell_table(b.table))
+            elif isinstance(b, ImageBlock):
+                images.append(b)  # deferred: its marker is usually already in text
+            else:  # ParagraphBlock / HeadingBlock
+                parts.append(getattr(b, "text", ""))
+        text = "\n".join(p for p in parts if p)
+        for img in images:  # only surface a marker the paragraph text didn't carry
+            if img.marker not in text:
+                text = f"{text}\n{img.marker}" if text else img.marker
+        return text
+
+
+def text_cell(text: str | None) -> "Cell | None":
+    """Wrap plain text as a `Cell`. None (merge-covered/absent) stays None; an
+    empty string becomes an empty cell (no paragraph)."""
+    if text is None:
+        return None
+    return Cell(blocks=[ParagraphBlock(id="", text=text)] if text else [])
+
+
+def _cell_from_dict(data: Any) -> "Cell | None":
+    """Deserialize one cell slot, tolerant of the v1 schema (a bare string)."""
+    if data is None:
+        return None
+    if isinstance(data, str):  # legacy v1: cell was a plain string
+        return text_cell(data)
+    return Cell.from_dict(data)
+
+
+def _render_cell_table(table: "TableData") -> str:
+    """Inline text rendering of a table found inside a cell."""
+    if _table_has_subtable(table):
+        return _render_header_value(table)  # markdown can't nest a table
+    return _render_gfm(table)
+
+
+def _table_has_subtable(table: "TableData") -> bool:
+    return any(
+        isinstance(b, TableBlock)
+        for row in table.cells for c in row if c is not None
+        for b in c.blocks
+    )
+
+
+def _cell_text(c: "Cell | None") -> str:
+    return "" if c is None else c.plain_text().replace("\n", " ").strip()
+
+
+def _render_gfm(table: "TableData") -> str:
+    rows = table.cells
+    if not rows:
+        return ""
+    out = ["| " + " | ".join(_cell_text(c).replace("|", r"\|") for c in rows[0]) + " |",
+           "| " + " | ".join("---" for _ in rows[0]) + " |"]
+    for row in rows[1:]:
+        out.append("| " + " | ".join(_cell_text(c).replace("|", r"\|") for c in row) + " |")
+    return "\n".join(out)
+
+
+def _render_header_value(table: "TableData") -> str:
+    rows = table.cells
+    if not rows:
+        return ""
+    headers = [_cell_text(c) for c in rows[0]]
+    groups: list[str] = []
+    for row in rows[1:]:
+        pairs = []
+        for i, c in enumerate(row):
+            head = headers[i] if i < len(headers) and headers[i] else f"col{i}"
+            # a cell may itself contain a table -> plain_text recurses one level down
+            val = "" if c is None else c.plain_text()
+            pairs.append(f"{head}: {val}")
+        groups.append("\n".join(pairs))
+    return "\n\n".join(groups)
 
 
 # ---------------------------------------------------------------------------

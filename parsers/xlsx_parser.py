@@ -20,6 +20,7 @@ import openpyxl
 
 from .base import (
     BaseParser, ParsedDocument, Span, HeadingBlock, TableBlock, TableData, Merge,
+    text_cell,
 )
 from ._ooxml import element_byte_range
 
@@ -77,8 +78,10 @@ class XlsxParser(BaseParser):
                     rowspan=rng.max_row - rng.min_row + 1,
                     colspan=rng.max_col - rng.min_col + 1))
 
-            table = TableData(n_rows=len(rows), n_cols=max_c - min_c + 1,
-                              cells=rows, merges=merges)
+            table = TableData(
+                n_rows=len(rows), n_cols=max_c - min_c + 1,
+                cells=[[text_cell(v) for v in row] for row in rows],
+                merges=merges)
 
             blocks.append(HeadingBlock(id=next_id(), text=ws.title, level=1))
             part, brange = sheet_spans.get(idx, (None, None))

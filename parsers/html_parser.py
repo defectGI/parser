@@ -25,7 +25,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from .base import (
-    BaseParser, ParsedDocument, Span,
+    BaseParser, ParsedDocument, Span, text_cell,
     HeadingBlock, ParagraphBlock, TableBlock, ImageBlock, TableData, Merge,
 )
 
@@ -65,7 +65,8 @@ def _build_table(rows: list[list[tuple[str, int, int]]]) -> TableData:
             c += cs
             ncols = max(ncols, c)
     nrows = max((r for r, _ in grid), default=-1) + 1
-    cells = [[grid.get((r, c)) for c in range(ncols)] for r in range(nrows)]
+    cells = [[text_cell(grid.get((r, c))) for c in range(ncols)]
+             for r in range(nrows)]
     return TableData(n_rows=nrows, n_cols=ncols, cells=cells, merges=merges)
 
 
@@ -248,7 +249,8 @@ class _Builder(HTMLParser):
         table = _build_table(t["rows"]) if t["rows"] else TableData(0, 0)
         end = self._byte(self.getpos()) + len("</table>")
         if self._cell_open:  # nested table -> flatten into parent cell (v1)
-            flat = " ".join(c for row in table.cells for c in row if c)
+            flat = " ".join(c.plain_text() for row in table.cells
+                            for c in row if c)
             self.tables[-1]["cell"].append(flat)
             return
         self.blocks.append(TableBlock(

@@ -30,24 +30,29 @@ class OpenAICompatClient:
         model: str,
         api_key: str | None = None,
         timeout: float = 120.0,
+        extra_body: dict | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        # Merged into every request body — e.g. {"reasoning": {"enabled": False}}
+        # to stop a reasoning model from spending the token budget on hidden
+        # thinking (which leaves message.content null for short-answer tasks).
+        self.extra_body = extra_body or {}
 
     def complete(self, *, system: str, user: str, max_tokens: int = 1024) -> str:
-        body = json.dumps(
-            {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 0,
-            }
-        ).encode("utf-8")
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            **self.extra_body,
+        }
+        body = json.dumps(payload).encode("utf-8")
 
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions", data=body, method="POST"

@@ -23,7 +23,7 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.oxml.ns import qn
 
 from .base import (
-    BaseParser, ParsedDocument, Span,
+    BaseParser, ParsedDocument, Span, Cell, text_cell,
     HeadingBlock, ParagraphBlock, TableBlock, ImageBlock, TableData, Merge,
 )
 
@@ -46,14 +46,14 @@ def _bullet_kind(paragraph) -> str:
 
 def _table_data(table) -> TableData:
     nrows, ncols = len(table.rows), len(table.columns)
-    cells: list[list[str | None]] = [[None] * ncols for _ in range(nrows)]
+    cells: list[list[Cell | None]] = [[None] * ncols for _ in range(nrows)]
     merges: list[Merge] = []
     for r in range(nrows):
         for c in range(ncols):
             cell = table.cell(r, c)
             if cell.is_spanned:
                 continue  # covered by a merge origin -> stays None
-            cells[r][c] = cell.text
+            cells[r][c] = text_cell(cell.text)
             if cell.is_merge_origin and (cell.span_height > 1 or cell.span_width > 1):
                 merges.append(Merge(row=r, col=c,
                                     rowspan=cell.span_height, colspan=cell.span_width))

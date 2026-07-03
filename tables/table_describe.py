@@ -91,7 +91,8 @@ def render_table(table: TableData) -> str:
     """
     lines = []
     for row in table.cells:
-        lines.append(" | ".join("" if cell is None else str(cell) for cell in row))
+        lines.append(" | ".join(
+            "" if cell is None else cell.plain_text() for cell in row))
     text = "\n".join(lines)
     if table.merges:
         spans = "; ".join(

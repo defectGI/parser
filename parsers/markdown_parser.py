@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 
 from .base import (
-    BaseParser, ParsedDocument, Span,
+    BaseParser, ParsedDocument, Span, text_cell,
     HeadingBlock, ParagraphBlock, TableBlock, ImageBlock, TableData,
 )
 
@@ -178,7 +178,8 @@ class MarkdownParser(BaseParser):
                 blocks.append(TableBlock(
                     id=next_id(), span=Span(byte_start=start, byte_end=blk_end),
                     table=TableData(n_rows=len(rows), n_cols=ncols,
-                                    cells=[list(r) for r in rows])))
+                                    cells=[[text_cell(x) for x in r]
+                                           for r in rows])))
                 i = j
                 continue
 
