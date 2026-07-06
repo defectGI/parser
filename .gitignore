@@ -10,3 +10,5 @@ storage/images/*
 !storage/images/README.md
 storage/output/*
 !storage/output/README.md
+docling_test/
+.claude/
