@@ -1,3 +1,0 @@
-.claude/
-docling_test
-.env

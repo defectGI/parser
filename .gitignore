@@ -5,3 +5,8 @@ docling_test/.venv/
 docling_test/samples/
 docling_test/output/
 review/
+corpus/
+storage/images/*
+!storage/images/README.md
+storage/output/*
+!storage/output/README.md
