@@ -55,6 +55,8 @@ seviyeye denk gelir, tek bir sayfaya göre değil.
 
 Diğer aşamalar
 --------------
-images/: henüz yazılmadı.
+images/: her görseli (tablo hücresi içindekiler dahil) kaynağından bulup sha256 ile
+saklar; VLM ile OCR'a sokar, anlamlıysa düzeltilmiş metni görselin kendi kaydına yazar.
+Uzak (http/https) görsel adreslerini çözmez.
 tables/: yazıldı, tabloya açıklama üretiyor.
 webapp/: henüz yazılmadı.
