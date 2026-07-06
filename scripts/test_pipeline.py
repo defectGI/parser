@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from images.image_handler import handle_images
 from parsers.registry import parser_for
 from storage_paths import output_dir
 from tables.table_describe import describe_tables
@@ -39,6 +40,9 @@ def main() -> None:
 
     print(f"parsed: fmt={doc.fmt} blocks={len(doc.blocks)} "
           f"tables={len(doc.tables())} images={len(doc.images())}")
+
+    print("resolving images...")
+    handle_images(doc)
 
     if doc.tables():
         print("describing tables via LLM...")
