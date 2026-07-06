@@ -3,16 +3,27 @@ altina kopyalar. LLM'i tekrar cagirmaz; sadece var olan dosyalari eslestirir.
 
 Kullanim:
     python scripts/pair_review.py
+
+Environment (all optional):
+    PAIR_REVIEW_CORPUS_DIR   raw docx corpus to match against (default corpus_docx)
+    PAIR_REVIEW_DIR          where matched pairs are copied (default review)
+    parsed IR output dir is the shared STORAGE_OUTPUT_DIR (see storage_paths.py)
 """
 
 from __future__ import annotations
 
+import os
 import shutil
+import sys
 from pathlib import Path
 
-CORPUS_DIR = Path("corpus_docx")
-OUTPUT_DIR = Path("storage/output")
-REVIEW_DIR = Path("review")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from storage_paths import output_dir
+
+CORPUS_DIR = Path(os.getenv("PAIR_REVIEW_CORPUS_DIR", "corpus_docx"))
+OUTPUT_DIR = output_dir()
+REVIEW_DIR = Path(os.getenv("PAIR_REVIEW_DIR", "review"))
 
 
 def main() -> None:

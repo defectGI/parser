@@ -44,10 +44,14 @@ birleşmeleri ve görseller için). Gömülü fotoğraf/diyagramlar hem dijital
 hem taranmış sayfalarda okuma sırasındaki gerçek konumuyla ImageBlock
 olarak çıkar; geometrik karşılığı bulunamayan bir figür "unverified"
 işaretlenir ve sessizce kaybolmaz — VLM figür için kendi bbox tahminini
-verdiyse crop o tahmine sıkılaşır, vermediyse sayfa geneli kırpıma düşer.
-Dijital (code path) sayfalarda kalın/italik, kelimenin kendi font adından
-(docx'teki run stilini okumanın PDF karşılığı) deterministik olarak okunur;
-VLM'in okuduğu (hybrid/scanned) sayfalarda bu bilgi henüz okunmaz.
+verdiyse crop o tahmine sıkılaşır, vermediyse hiç crop üretilmez. Kalın/italik
+kelimenin kendi font adından (docx'teki run stilini okumanın PDF karşılığı)
+deterministik olarak okunur; dijital sayfalarda (code path) doğrudan, VLM'in
+okuduğu dijital sayfalarda (hybrid) text-layer'a doğrulanmış metne geriye
+dönük hizalanarak. Taranmış sayfalarda (scanned, gerçek text layer yok) bu
+bilgi okunmaz. Başlık seviyesi (1-6), font büyüklüğüne göre doküman geneli
+sıralanır — aynı font büyüklüğü dokümanın neresinde geçerse geçsin aynı
+seviyeye denk gelir, tek bir sayfaya göre değil.
 
 Diğer aşamalar
 --------------

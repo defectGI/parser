@@ -44,20 +44,28 @@ its own ungrounded grid for the unpaired ones; a VLM "figure" spec is paired
 the same way with pdfplumber's embedded raster objects, giving the figure
 both a true reading-order position and a geometric bbox when the counts line
 up (an unpaired spec still becomes an ImageBlock, just unverified with an
-audit crop -- tight to the VLM's own bbox guess when it gave one, else the
-full page; an unpaired raster object is still appended, just without a
+audit crop tight to the VLM's own bbox guess when it gave one, else no crop
+at all -- a full-page dump is not a useful crop for a single figure; an
+unpaired raster object is still appended, just without a
 position). On scanned pages the raster that IS the scan itself (spanning
 most of the page) is excluded from that pairing so it can't masquerade as a
-verified figure. Inline formatting `runs` (bold/italic) are filled on the code
-path from each word's own font name (e.g. "Arial-BoldMT") -- the PDF
-equivalent of reading a docx run's rPr, deterministic and not a VLM guess.
-Hybrid/scanned pages (VLM-read) do not fill `runs`: there is no independent
+verified figure. Inline formatting `runs` (bold/italic) come from each word's
+own font name (e.g. "Arial-BoldMT") -- the PDF equivalent of reading a docx
+run's rPr, deterministic and not a VLM guess. On the code path this is direct;
+on the hybrid path it's backfilled onto a "text-layer-verified" block by
+aligning its (VLM-read) words back onto the page's own font-tagged word
+stream in reading order (`_align_runs`) -- the page is born-digital, so the
+font source is real, it's just read once for content and once for formatting.
+Blocks the text layer couldn't confirm are left unmarked rather than aligned,
+since a wording mismatch means the alignment itself can't be trusted. Scanned
+pages (no text layer at all) still don't fill `runs`: there is no independent
 source to verify a bold/italic claim against, unlike text content itself.
 
 Environment (all optional):
     PDF_VLM             "0" disables all VLM use (deterministic fallbacks only)
     PDF_RENDER_DPI      page render resolution for VLM/crops (default 150)
-    PDF_CROP_DIR        blob dir for audit crops (default storage/images)
+    PDF_CROP_DIR        blob dir for audit crops (default: STORAGE_IMAGES_DIR,
+                        see storage_paths.py -- storage/images if that's unset too)
     PDF_VLM_MAX_TOKENS  token budget for a page read (default 8192)
     PDF_CONTAINMENT     token containment threshold, 0..1 (default 0.9)
     PDF_LINE_MATCH      per-line consensus similarity threshold (default 0.8)
@@ -82,6 +90,7 @@ import pdfplumber
 from PIL import Image
 
 from llm import LLMError, VLMClient, get_vlm_client
+from storage_paths import images_dir
 
 from .base import (
     BaseParser, ParsedDocument, Span, text_cell,
@@ -378,11 +387,13 @@ def _default_detector() -> TextDetector | None:
 def _store_crop(data: bytes) -> str:
     """Write an audit crop into the image blob store; return its sha256.
 
-    Same store as document images (`storage/images/`, immutable, dedup by
-    content hash) so the webapp/citation pipeline resolves both the same way.
+    Same store as document images (immutable, dedup by content hash) so the
+    webapp/citation pipeline resolves both the same way. `PDF_CROP_DIR`
+    overrides just this call site; otherwise it's the shared image store
+    (`storage_paths.images_dir`, itself overridable via `STORAGE_IMAGES_DIR`).
     """
     sha = hashlib.sha256(data).hexdigest()
-    root = Path(os.getenv("PDF_CROP_DIR", "storage/images"))
+    root = Path(os.getenv("PDF_CROP_DIR") or images_dir())
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{sha}.png"
     if not path.exists():
@@ -411,13 +422,14 @@ def _union_bbox(boxes: list[tuple[float, float, float, float]]
             max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
-def _figure_crop(png: bytes, locator: dict[str, Any]) -> bytes:
+def _figure_crop(png: bytes, locator: dict[str, Any]) -> bytes | None:
     """Audit crop for an unpaired figure: tight to the VLM's own bbox guess
-    (`vlm_bbox`, normalized fractions of the page) when it gave one, else the
-    full rendered page -- the only honest fallback when nothing bounds it."""
+    (`vlm_bbox`, normalized fractions of the page) when it gave one, else
+    None -- a full-page dump is not a useful crop for a single figure, so we
+    skip storing one rather than hand back something misleadingly ugly."""
     vlm_bbox = locator.pop("vlm_bbox", None)
     if vlm_bbox is None:
-        return png
+        return None
     img = Image.open(io.BytesIO(png))
     x0, y0, x1, y1 = vlm_bbox
     bbox = (x0 * img.width, y0 * img.height, x1 * img.width, y1 * img.height)
@@ -486,6 +498,64 @@ def _slice_runs(runs: list[InlineRun], start: int) -> list[InlineRun]:
             out.append(InlineRun(r.text[max(0, start - pos):], r.marks))
         pos = end
     return finalize_runs(out)
+
+
+def _word_marks_stream(prep: dict, tboxes: list
+                       ) -> list[tuple[str, tuple[Mark, ...]]]:
+    """Page words (minus table regions), in the same column-major reading
+    order the code path reconstructs (`_parse_code`), each tagged with its
+    deterministic font marks (`_word_marks`). Alignment source for backfilling
+    hybrid-path runs onto VLM text that this same page's text layer has
+    already confirmed -- not a new signal, just the code path's own one,
+    read for a page the triage routed to the VLM instead."""
+    words = [w for w in (prep.get("words") or []) if not _in_boxes(w, tboxes)]
+    gutter = prep.get("gutter")
+    if gutter is None:
+        columns = [words]
+    else:
+        columns = [
+            [w for w in words if (w["x0"] + w["x1"]) / 2 < gutter],
+            [w for w in words if (w["x0"] + w["x1"]) / 2 >= gutter],
+        ]
+    return [(w["text"], _word_marks(w))
+            for cwords in columns
+            for w in sorted(cwords, key=lambda w: (w["top"], w["x0"]))]
+
+
+def _align_runs(text: str, stream: list[tuple[str, tuple[Mark, ...]]],
+                pos: list[int], lookahead: int = 40) -> list[InlineRun]:
+    """Backfill `text`'s own words with marks from `stream`, matching forward
+    only from `pos[0]` (a single counter shared and advanced across every
+    block on the page, in the page's reading order -- it never rewinds).
+
+    A word is matched to the next equal (normalized) word within `lookahead`
+    slots of the current position; on a match the counter jumps past it, on a
+    miss the word is left unmarked and the counter doesn't move. This keeps
+    later blocks aligned even when one block's wording doesn't line up
+    perfectly (VLM paraphrase, OCR noise) -- it costs that block's marks, not
+    everyone after it. Always returns runs whose concatenation is `text`
+    exactly, matched or not.
+    """
+    runs: list[InlineRun] = []
+    pending = ""
+    for tok in re.findall(r"\S+|\s+", text):
+        if tok.isspace():
+            pending += tok
+            continue
+        target = _norm(tok).strip(_PUNCT_EDGES)
+        marks: tuple[Mark, ...] = ()
+        if target:
+            limit = min(len(stream), pos[0] + lookahead)
+            for j in range(pos[0], limit):
+                if _norm(stream[j][0]).strip(_PUNCT_EDGES) == target:
+                    marks = stream[j][1]
+                    pos[0] = j + 1
+                    break
+        runs.append(InlineRun(pending + tok, marks))
+        pending = ""
+    if pending:
+        runs.append(InlineRun(pending, ()))
+    return finalize_runs(runs)
 
 
 def _cluster_lines(words: list[dict]) -> list[_Line]:
@@ -580,13 +650,27 @@ def _is_heading(line: _Line, body_size: float) -> bool:
             and len(line.text.split()) <= 14 and bool(line.text.strip()))
 
 
-def _specs_from_lines(lines: list[_Line]) -> list[_Spec]:
-    """Classify visual lines into heading / paragraph / list-item specs."""
+def _heading_candidate_sizes(lines: list[_Line], body: float) -> set[float]:
+    return {round(l.size, 1) for l in lines if _is_heading(l, body)}
+
+
+def _specs_from_lines(lines: list[_Line],
+                      heading_sizes: list[float] | None = None
+                      ) -> list[_Spec]:
+    """Classify visual lines into heading / paragraph / list-item specs.
+
+    `heading_sizes` (sorted, descending, distinct sizes -> level 1..6) ranks
+    across the whole document by default (see `_doc_heading_sizes`), not just
+    this call's own lines, so the same physical font size gets the same level
+    everywhere -- a chapter heading on page 50 isn't demoted just because
+    page 50 alone has no bigger text on it. Recomputed from just `lines` when
+    omitted (e.g. standalone use)."""
     if not lines:
         return []
     body = median(l.size for l in lines)
-    heading_sizes = sorted({round(l.size, 1) for l in lines
-                            if _is_heading(l, body)}, reverse=True)
+    if heading_sizes is None:
+        heading_sizes = sorted(_heading_candidate_sizes(lines, body),
+                               reverse=True)
 
     specs: list[_Spec] = []
     para: list[_Line] = []
@@ -646,6 +730,36 @@ def _specs_from_lines(lines: list[_Line]) -> list[_Spec]:
                 s.list_level = next(i for i, x in enumerate(xs)
                                     if abs(s.x0 - x) <= 4)
     return specs
+
+
+def _code_columns(prep: dict) -> list[list[dict]]:
+    """Page words (minus table regions) split into gutter columns -- the
+    same partition `_parse_code` builds blocks from, factored out so the
+    document-wide heading-size pass (`_doc_heading_sizes`) sees exactly the
+    lines the real pass will."""
+    tboxes = [t.bbox for t in (prep.get("tables") or [])]
+    words = [w for w in (prep.get("words") or []) if not _in_boxes(w, tboxes)]
+    gutter = prep.get("gutter")
+    if gutter is None:
+        return [words]
+    return [
+        [w for w in words if (w["x0"] + w["x1"]) / 2 < gutter],
+        [w for w in words if (w["x0"] + w["x1"]) / 2 >= gutter],
+    ]
+
+
+def _page_heading_candidates(prep: dict) -> set[float]:
+    """Candidate heading font sizes for one page, across its gutter columns
+    -- the same partition/threshold `_parse_code` builds blocks from, reused
+    so the document-wide ranking (see `PdfParser.parse`) sees exactly the
+    sizes the real pass will encounter."""
+    sizes: set[float] = set()
+    for cwords in _code_columns(prep):
+        lines = _cluster_lines(cwords)
+        if not lines:
+            continue
+        sizes |= _heading_candidate_sizes(lines, median(l.size for l in lines))
+    return sizes
 
 
 def _in_boxes(w: dict, boxes: list[tuple]) -> bool:
@@ -819,16 +933,33 @@ class PdfParser(BaseParser):
 
         with pdfplumber.open(raw_path) as pdf:
             page_count = len(pdf.pages)
-            for pageno, page in enumerate(pdf.pages, start=1):
-                route, info, prep = self._triage(page)
+            triaged = [(pageno, page, *self._triage(page))
+                      for pageno, page in enumerate(pdf.pages, start=1)]
+
+            # Heading levels rank font sizes once across the whole document,
+            # not per page/column, so the same physical size always maps to
+            # the same level (see _specs_from_lines). Both "code" pages and
+            # "hybrid" pages are scanned for candidates: a hybrid page falls
+            # back to the font-based code path whenever the VLM is
+            # unavailable, and that fallback must never hit a size the
+            # ranking doesn't know about.
+            heading_sizes = sorted(
+                {sz for _, _, route, _, prep in triaged
+                 if route in ("code", "hybrid")
+                 for sz in _page_heading_candidates(prep)},
+                reverse=True)
+
+            for pageno, page, route, info, prep in triaged:
                 meta = {"page": pageno, "route": route, "used": route, **info}
                 if route == "empty":
                     meta["used"] = "empty"
                 elif route == "code":
-                    blocks.extend(self._parse_code(page, pageno, prep, ct))
+                    blocks.extend(
+                        self._parse_code(page, pageno, prep, ct, heading_sizes))
                 elif route == "hybrid":
                     blocks.extend(
-                        self._parse_hybrid(page, pageno, prep, ct, meta))
+                        self._parse_hybrid(page, pageno, prep, ct, meta,
+                                           heading_sizes))
                 else:  # scanned
                     blocks.extend(self._parse_scanned(page, pageno, ct, meta))
                 page_meta.append(meta)
@@ -880,21 +1011,12 @@ class PdfParser(BaseParser):
 
     # -- code path -----------------------------------------------------------
 
-    def _parse_code(self, page, pageno: int, prep: dict, ct: _Counters
+    def _parse_code(self, page, pageno: int, prep: dict, ct: _Counters,
+                    heading_sizes: list[float] | None = None
                     ) -> list[Block]:
         tables = prep.get("tables") or []
-        tboxes = [t.bbox for t in tables]
-        words = [w for w in (prep.get("words") or [])
-                 if not _in_boxes(w, tboxes)]
         gutter = prep.get("gutter")
-
-        if gutter is None:
-            columns = [words]
-        else:
-            columns = [
-                [w for w in words if (w["x0"] + w["x1"]) / 2 < gutter],
-                [w for w in words if (w["x0"] + w["x1"]) / 2 >= gutter],
-            ]
+        columns = _code_columns(prep)
 
         def col_of(x_center: float) -> int:
             return 0 if gutter is None or x_center < gutter else 1
@@ -902,7 +1024,7 @@ class PdfParser(BaseParser):
         # (column, top, block): reading order = column-major, then top-down.
         entries: list[tuple[int, float, Block]] = []
         for ci, cwords in enumerate(columns):
-            specs = _specs_from_lines(_cluster_lines(cwords))
+            specs = _specs_from_lines(_cluster_lines(cwords), heading_sizes)
             group_ids: dict[int, str] = {}
             for sp in specs:
                 span = Span(page=pageno)
@@ -1081,12 +1203,13 @@ class PdfParser(BaseParser):
     # -- hybrid path -----------------------------------------------------------
 
     def _parse_hybrid(self, page, pageno: int, prep: dict, ct: _Counters,
-                      meta: dict[str, Any]) -> list[Block]:
+                      meta: dict[str, Any],
+                      heading_sizes: list[float] | None = None) -> list[Block]:
         vlm = self._primary()
         if vlm is None:
             meta["used"] = "code"
             meta["note"] = "no VLM configured; code-path fallback"
-            return self._parse_code(page, pageno, prep, ct)
+            return self._parse_code(page, pageno, prep, ct, heading_sizes)
 
         png = self._render(page)
         grounding = page.extract_text() or ""
@@ -1094,12 +1217,15 @@ class PdfParser(BaseParser):
         if specs is None:
             meta["used"] = "code"
             meta["note"] = "VLM page read failed; code-path fallback"
-            return self._parse_code(page, pageno, prep, ct)
+            return self._parse_code(page, pageno, prep, ct, heading_sizes)
 
         page_tokens = _counter(_tok_list(grounding))
         page_crit = _criticals(grounding)
         contain = _env_float("PDF_CONTAINMENT", 0.9)
         second = self._second_reader(png)
+        tboxes = [t.bbox for t in (prep.get("tables") or [])]
+        word_stream = _word_marks_stream(prep, tboxes)
+        align_pos = [0]
 
         # Sorted so positional pairing with the VLM's own reading-order
         # "figure" specs (see _blocks_from_vlm) lines up top-to-bottom.
@@ -1111,10 +1237,13 @@ class PdfParser(BaseParser):
             if isinstance(b, ImageBlock):
                 if "bbox" not in b.locator:
                     # VLM claimed a figure pdfplumber's object model can't
-                    # back geometrically (e.g. a vector drawing) -- honest
-                    # unverified crop, same audit pattern as disputed text.
+                    # back geometrically (e.g. a vector drawing) -- unverified,
+                    # with a tight audit crop only if the VLM guessed a bbox;
+                    # no bbox guess means no crop rather than a full-page dump.
                     b.provenance = PROV_UNVERIFIED
-                    b.source_crop = _store_crop(_figure_crop(png, b.locator))
+                    crop = _figure_crop(png, b.locator)
+                    if crop is not None:
+                        b.source_crop = _store_crop(crop)
                 continue
             text = _block_text(b)
             tokens = _tok_list(text)
@@ -1130,6 +1259,17 @@ class PdfParser(BaseParser):
                     b.provenance = PROV_UNVERIFIED
                     b.source_crop = _store_crop(png)
             _flatten_newlines(b)
+            if (b.provenance == PROV_TEXT_LAYER
+                    and isinstance(b, (ParagraphBlock, HeadingBlock))):
+                # The block's own wording is now confirmed against this same
+                # page's text layer, so its font names are a real source --
+                # the same deterministic bold/italic signal the code path
+                # reads, not a VLM guess. Unconfirmed blocks are skipped: their
+                # wording may not line up with the text layer at all, so
+                # aligning against it could attach wrong marks.
+                runs = _align_runs(b.text, word_stream, align_pos)
+                if runs_have_marks(runs):
+                    b.runs = runs
 
         # Anything the VLM didn't call out as a figure still gets a block --
         # deterministic, from the PDF's own object model -- just without a
@@ -1203,10 +1343,13 @@ class PdfParser(BaseParser):
             if isinstance(b, ImageBlock):
                 if "bbox" not in b.locator:
                     # No independent source can confirm "there is a figure
-                    # here" the way the detector confirms text -- honest
-                    # unverified crop, same audit pattern as disputed text.
+                    # here" the way the detector confirms text -- unverified,
+                    # with a tight audit crop only if the VLM guessed a bbox;
+                    # no bbox guess means no crop rather than a full-page dump.
                     b.provenance = PROV_UNVERIFIED
-                    b.source_crop = _store_crop(_figure_crop(png, b.locator))
+                    crop = _figure_crop(png, b.locator)
+                    if crop is not None:
+                        b.source_crop = _store_crop(crop)
                 continue
             failed_boxes: list[tuple[float, float, float, float]] = []
             all_ok = True
