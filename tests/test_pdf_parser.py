@@ -157,6 +157,75 @@ def two_column_with_image_pdf() -> bytes:
     ])
 
 
+def two_page_pdf_mixed_heading_sizes() -> bytes:
+    """Page 1 has a size-18 heading (the document's biggest) plus size-11
+    body lines; page 2 has only a size-14 heading plus size-11 body lines --
+    big enough to be the biggest thing on its own page, but smaller than page
+    1's, so document-wide heading-level ranking must place it at level 2,
+    not level 1 (which page-local ranking would give it)."""
+    def page_content(heading_size: float, heading_text: str) -> bytes:
+        content = b""
+        y = 792 - 80 - heading_size
+        content += (f"BT /F1 {heading_size} Tf 72 {y} Td "
+                    f"({text_escape(heading_text)}) Tj ET\n").encode("latin-1")
+        for i, body in enumerate(["body line one here",
+                                  "body line two here",
+                                  "body line three here"]):
+            top = 140.0 + 20 * i
+            y = 792 - top - 11
+            content += (f"BT /F1 11 Tf 72 {y} Td "
+                        f"({text_escape(body)}) Tj ET\n").encode("latin-1")
+        return content
+
+    return _build_pdf([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 6 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 6 0 R >> >> /Contents 7 0 R >>",
+        _stream(b"<<", page_content(18.0, "Big Heading")),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        _stream(b"<<", page_content(14.0, "Small Heading")),
+    ])
+
+
+def two_column_pdf_with_bold_word() -> bytes:
+    """Same two-column layout as two_column_pdf(), but "delta" in the first
+    right-column line is rendered in Helvetica-Bold -- exercises hybrid-path
+    run backfill against the page's own text layer. Kept clear of the left
+    column's max extent so gutter detection is unaffected."""
+    content = b""
+    size = 10.0
+    for i, text in enumerate(TWO_COL_LEFT):
+        top = 100.0 + 20 * i
+        y = 792 - top - size
+        esc = text_escape(text)
+        content += f"BT /F1 {size} Tf 50 {y} Td ({esc}) Tj ET\n".encode("latin-1")
+    y0 = 792 - 100.0 - size
+    for font, x, text in (
+        ("F1", 340.0, "right column line 1"),
+        ("F2", 460.0, "delta"),
+        ("F1", 500.0, "epsilon zeta"),
+    ):
+        esc = text_escape(text)
+        content += f"BT /{font} {size} Tf {x} {y0} Td ({esc}) Tj ET\n".encode("latin-1")
+    for i, text in enumerate(TWO_COL_RIGHT[1:], start=1):
+        top = 100.0 + 20 * i
+        y = 792 - top - size
+        esc = text_escape(text)
+        content += f"BT /F1 {size} Tf 340 {y} Td ({esc}) Tj ET\n".encode("latin-1")
+    return _build_pdf([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R /F2 6 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        _stream(b"<<", content),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+    ])
+
+
 def text_escape(text: str) -> str:
     return text.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
 
@@ -324,6 +393,27 @@ def test_code_path_bold_italic_runs_from_font_name(tmp_path):
     assert marks_by_word["italicword"] == {Mark.ITALIC}
 
 
+def test_code_path_heading_level_ranked_document_wide(tmp_path):
+    # Page 2's only heading (size 14) is locally the biggest thing on its own
+    # page -- page-local ranking would call it level 1 -- but page 1 has a
+    # bigger heading (size 18), so document-wide ranking must give page 2's
+    # heading level 2.
+    path = tmp_path / "twopage.pdf"
+    path.write_bytes(two_page_pdf_mixed_heading_sizes())
+
+    doc = offline_parser().parse(path, "doc_headings")
+    assert doc.page_count == 2
+    assert doc.metadata["pdf_pages"][0]["route"] == "code"
+    assert doc.metadata["pdf_pages"][1]["route"] == "code"
+
+    headings = [b for b in doc.blocks if isinstance(b, HeadingBlock)]
+    assert len(headings) == 2
+    big = next(h for h in headings if h.span.page == 1)
+    small = next(h for h in headings if h.span.page == 2)
+    assert big.text == "Big Heading" and big.level == 1
+    assert small.text == "Small Heading" and small.level == 2
+
+
 def test_multicolumn_without_vlm_falls_back_to_code(tmp_path):
     path = tmp_path / "twocol.pdf"
     path.write_bytes(two_column_pdf())
@@ -388,10 +478,40 @@ def test_hybrid_hallucination_is_unverified_with_crop(tmp_path, monkeypatch):
     assert all(b.provenance == PROV_TEXT_LAYER for b in good)
 
 
-def test_hybrid_figure_unpaired_is_unverified_with_crop(tmp_path, monkeypatch):
+def test_hybrid_bold_run_backfilled_from_text_layer(tmp_path):
+    # "delta" is Helvetica-Bold in the PDF's own text layer; the VLM's
+    # transcription carries no font info at all, but its wording matches the
+    # text layer verbatim (PROV_TEXT_LAYER), so runs are backfilled from the
+    # same deterministic font-name signal the code path reads directly.
+    path = tmp_path / "twocol_bold.pdf"
+    path.write_bytes(two_column_pdf_with_bold_word())
+
+    vlm = FakeVLM(_hybrid_payload())
+    doc = offline_parser(vlm=vlm).parse(path, "doc_hybrid_runs")
+
+    meta = doc.metadata["pdf_pages"][0]
+    assert meta["route"] == "hybrid" and meta["used"] == "hybrid"
+
+    paras = [b for b in doc.blocks if isinstance(b, ParagraphBlock)]
+    target = next(b for b in paras if b.text == TWO_COL_RIGHT[0])
+    assert target.provenance == PROV_TEXT_LAYER
+    assert "".join(r.text for r in target.runs) == target.text
+
+    from parsers.base import Mark
+    bold_runs = [r for r in target.runs if Mark.BOLD in r.marks]
+    assert len(bold_runs) == 1 and bold_runs[0].text.strip() == "delta"
+
+    # Untouched paragraphs (including ones after "delta" in reading order)
+    # still align cleanly -- the shared pointer never rewound past them.
+    other = next(b for b in paras if b.text == TWO_COL_RIGHT[1])
+    assert other.runs == []
+
+
+def test_hybrid_figure_unpaired_is_unverified_no_crop(tmp_path, monkeypatch):
     # No embedded raster in this PDF at all: a VLM-claimed figure has nothing
     # to pair with geometrically, so it must still surface as an ImageBlock,
-    # just flagged unverified with an audit crop (never silently dropped).
+    # flagged unverified (never silently dropped). With no bbox guess either,
+    # a full-page dump wouldn't be a useful crop, so none is stored.
     crop_dir = tmp_path / "crops"
     monkeypatch.setenv("PDF_CROP_DIR", str(crop_dir))
     path = tmp_path / "twocol.pdf"
@@ -408,8 +528,7 @@ def test_hybrid_figure_unpaired_is_unverified_with_crop(tmp_path, monkeypatch):
     assert "bbox" not in images[0].locator
     assert images[0].locator["region"] == "vlm_figure"
     assert images[0].provenance == PROV_UNVERIFIED
-    assert images[0].source_crop is not None
-    assert (crop_dir / f"{images[0].source_crop}.png").exists()
+    assert images[0].source_crop is None
     # the figure spec was first in the VLM's array -> first block in the doc
     assert doc.blocks[0] is images[0]
 
@@ -520,11 +639,11 @@ def test_scanned_second_vlm_rescues_disputed_line(tmp_path):
     assert len(vlm2.calls) == 1  # the crop-and-reread call
 
 
-def test_scanned_figure_over_background_scan_is_unverified_with_crop(tmp_path, monkeypatch):
+def test_scanned_figure_over_background_scan_is_unverified_no_crop(tmp_path, monkeypatch):
     # scanned_pdf()'s only raster IS the page-spanning scan itself -- it must
     # be excluded from geometric pairing, so a VLM-claimed figure here has
-    # nothing to pair with and surfaces as an honest unverified crop instead
-    # of silently vanishing or masquerading as a "confirmed" full-page bbox.
+    # nothing to pair with and surfaces as unverified. With no bbox guess
+    # either, a full-page dump wouldn't be a useful crop, so none is stored.
     crop_dir = tmp_path / "crops"
     monkeypatch.setenv("PDF_CROP_DIR", str(crop_dir))
     path = tmp_path / "scan.pdf"
@@ -541,15 +660,15 @@ def test_scanned_figure_over_background_scan_is_unverified_with_crop(tmp_path, m
     assert "bbox" not in img.locator
     assert img.locator["region"] == "vlm_figure"
     assert img.provenance == PROV_UNVERIFIED
-    assert img.source_crop is not None
-    assert (crop_dir / f"{img.source_crop}.png").exists()
+    assert img.source_crop is None
 
 
 def test_scanned_figure_with_vlm_bbox_gets_tight_crop(tmp_path, monkeypatch):
     # Same page-spanning-scan situation as the test above, but this time the
     # VLM volunteers its own (ungrounded) bbox for the sub-figure. It still
-    # can't be geometrically confirmed, so it stays unverified -- but the
-    # audit crop should now be tight to that bbox instead of the full page.
+    # can't be geometrically confirmed, so it stays unverified -- but since
+    # there's a bbox guess to work with, a tight audit crop is stored (unlike
+    # the no-bbox case, which stores none rather than a full-page dump).
     crop_dir = tmp_path / "crops"
     monkeypatch.setenv("PDF_CROP_DIR", str(crop_dir))
     path = tmp_path / "scan.pdf"
@@ -564,17 +683,7 @@ def test_scanned_figure_with_vlm_bbox_gets_tight_crop(tmp_path, monkeypatch):
     assert img.provenance == PROV_UNVERIFIED
     assert "vlm_bbox" not in img.locator  # consumed, not left dangling
     assert img.source_crop is not None
-
-    # Re-parse with no bbox for comparison: that crop is the full page.
-    crop_dir2 = tmp_path / "crops_full"
-    monkeypatch.setenv("PDF_CROP_DIR", str(crop_dir2))
-    vlm_full = FakeVLM(json.dumps([{"type": "figure"}]))
-    doc_full = offline_parser(vlm=vlm_full).parse(path, "doc9e")
-    img_full = doc_full.blocks[0]
-
-    tight_size = (crop_dir / f"{img.source_crop}.png").stat().st_size
-    full_size = (crop_dir2 / f"{img_full.source_crop}.png").stat().st_size
-    assert tight_size < full_size
+    assert (crop_dir / f"{img.source_crop}.png").exists()
 
 
 def test_scanned_figure_paired_with_real_subfigure_keeps_bbox(tmp_path):

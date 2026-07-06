@@ -14,14 +14,12 @@ docx
 pptx
 ----
 - Tablo hücre metninde inline formatting (bold/italic) kayıp
-- Native chart/SmartArt hiç yakalanmıyor (kapsam dışı kararı)
 
 xlsx
 ----
 - Hücre-içi zengin metin/format (runs) okunmuyor
 - Formül kayboluyor, sadece son hesaplanmış değer kalıyor
 - Sheet içindeki birden fazla mantıksal tablo tek TableBlock'a düzleşiyor
-- Chart/pivot tablo desteklenmiyor (kapsam dışı kararı)
 - Hücre-tabanlı başlık tespiti yok
 
 html
@@ -36,11 +34,6 @@ markdown
 
 pdf
 ---
-- VLM bbox vermezse (tahmin veremediği durumlarda) tek-raster figürde crop
-  yine sayfa geneli kalıyor
-- Inline formatting (runs): sadece code path'te (font adından bold/italic);
-  hybrid/scanned'de (VLM okuması) hâlâ yok — doğrulanacak bağımsız kaynak yok
-- Başlık seviyesi sayfa-içi font sıralamasıyla belirleniyor (doküman geneli değil)
 - Span'de byte offset yok, sadece sayfa numarası
 
 Genel

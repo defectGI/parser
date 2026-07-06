@@ -157,11 +157,48 @@ tablosuyla sırayla (reading-order) eşleştirilir ve VLM'in düz JSON grid'i ye
 gerçek text-layer'dan gelen merge-aware tablo konur — sayı uyuşmazsa eşleşmeyen
 tablo VLM'in kendi grid'ine düşer.
 
+### Başlık seviyesi
+
+Code path'te bir satırın başlık olup olmadığı kendi sütununun/sayfasının medyan
+gövde metni büyüklüğüne göre yerel olarak karar verilir (`_is_heading`) — bu
+değişmedi. Ama hangi seviyeye (1-6) denk geldiği artık **doküman geneli** bir
+font-büyüklüğü sıralamasıyla belirlenir: `parse()`, sayfaları asıl işlemeden
+önce tüm "code" ve "hybrid" (VLM'siz kalırsa code path'e düşebileceği için o
+da dahil) sayfaları tarayıp tüm başlık-adayı büyüklükleri tek bir kümede
+toplar (`_page_heading_candidates`), sıralar, ve bu ortak listeyi her sayfaya
+geçirir (`_specs_from_lines`'a `heading_sizes` parametresi olarak). Böylece
+50. sayfadaki bir bölüm başlığı, o sayfada ondan büyük başka bir şey olmadığı
+için yanlışlıkla level 1'e terfi etmez — 1. sayfadaki daha büyük bir başlık
+varsa level 2 (veya daha aşağı) kalır, doküman genelinde tutarlı bir hiyerarşi
+çıkar. Hybrid sayfalarda VLM başarıyla okuduysa başlık seviyesi hâlâ VLM'in
+kendi tahminidir (bu ayrı bir mekanizma); bu sıralama sadece VLM'siz/başarısız
+kalıp code path'e düşen hybrid sayfalar için devreye girer.
+
+### Inline formatting (runs)
+
+Bold/italic her zaman kelimenin kendi font adından okunur (ör. "Arial-BoldMT")
+— docx'te bir run'ın rPr'ini okumanın PDF karşılığı, determinist, VLM
+tahmini değil. Code path'te bu doğrudandır (`_word_marks`/`_line_runs`).
+Hybrid path'te sayfanın kendi kelime+font akışı (`_word_marks_stream`, code
+path'in sütun/gutter mantığıyla aynı reading-order) çıkarılır; bir blok metni
+zaten text layer'a karşı doğrulanıp `text-layer-verified` olduysa, o metnin
+kendi kelimeleri bu akışa **ileri yönlü, hiç geri sarmayan** bir işaretçiyle
+hizalanır (`_align_runs`) ve eşleşen kelimeler kendi font marks'ını alır.
+Doğrulanamamış (`consensus-verified`/`unverified`) bloklar hizalamaya hiç
+girmez — metni text layer'la zaten örtüşmüyor, hizalama da güvenilir olmaz.
+Scanned sayfada (text layer'ın kendisi yok) `runs` doldurulmaz; doğrulanacak
+bağımsız bir font kaynağı yok, bu kapsam dışı kalır.
+
 ### Bilinen v1 sınırları
 
-- Scanned sayfadaki figürler ayrı `ImageBlock` olarak çıkmıyor (yalnızca VLM'siz
-  fallback'te tam sayfa tek görsel kalıyor).
-- Hybrid sayfada gömülü görseller sayfa akışının sonuna ekleniyor (VLM okuma sırası verir
-  ama koordinat vermez).
-- `runs` (inline formatting) doldurulmuyor; heading seviyesi sayfa içi font-boyutu
-  sıralamasıyla belirleniyor.
+- Hem hybrid hem scanned sayfada VLM'in "figure" dediği ama pdfplumber'ın nesne
+  modelinde karşılığı bulunamayan figürler (ör. vektör çizim, taranmış arka
+  plan raster'ına gömülü alt-figür) `unverified` bir `ImageBlock` olarak kalır;
+  VLM kendi bbox tahminini verdiyse audit crop ona göre dar tutulur, vermediyse
+  hiç crop üretilmez (tam sayfa dökümü yanıltıcı olacağından tercih edilmez).
+- Hybrid sayfada VLM'in figür olarak saymadığı (VLM'in eksik saydığı) gömülü
+  görseller sayfa akışının sonuna, konumsuz ekleniyor; VLM'in figür dediği ve
+  pdfplumber'daki bir raster'la eşleşenler ise hem VLM'den gelen reading-order
+  konumunu hem pdfplumber'dan gelen gerçek bbox'ı birlikte alıyor.
+- Scanned sayfada `runs` (inline formatting) doldurulmaz (yukarıya bkz.).
+- `Span`'de byte offset yok, sadece sayfa numarası.

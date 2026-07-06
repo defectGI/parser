@@ -6,8 +6,10 @@ while there is no test suite yet.
 Usage:
     python scripts/test_pipeline.py <path-to-document> [doc_id]
 
-Writes the resulting IR to storage/output/<doc_id>.json and prints a summary
+Writes the resulting IR to <output-dir>/<doc_id>.json and prints a summary
 (block/table/image counts, each table's description and check status).
+Output dir defaults to storage/output, overridable via STORAGE_OUTPUT_DIR
+(see storage_paths.py).
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from parsers.registry import parser_for
+from storage_paths import output_dir
 from tables.table_describe import describe_tables
 
 
@@ -41,7 +44,7 @@ def main() -> None:
         print("describing tables via LLM...")
         describe_tables(doc)
 
-    out_path = Path("storage/output") / f"{doc_id}.json"
+    out_path = output_dir() / f"{doc_id}.json"
     doc.save(out_path)
     print(f"saved IR -> {out_path}")
 

@@ -30,5 +30,8 @@ kısa hatırlatma listesi için: [`EKSIKLER.txt`](EKSIKLER.txt).
 - `parsers/` — format bazlı parser'lar + `BaseParser`/`ParsedDocument` sözleşmesi
 - `images/` — `image_handler` ve `ocr_output_control`
 - `tables/` — `table_describe`
-- `storage/` — ham veri (`raw/`), sonuç IR çıktısı (`output/`), görsel blob store (`images/`)
+- `storage/` — ham veri (`raw/`), sonuç IR çıktısı (`output/`), görsel blob store (`images/`);
+  bu üç yol hardcoded değil, `storage_paths.py` üzerinden `STORAGE_RAW_DIR` /
+  `STORAGE_OUTPUT_DIR` / `STORAGE_IMAGES_DIR` env değişkenleriyle değiştirilebilir
+  (bkz. `.env.example`) — yoksa buradaki dev-time varsayılanlara düşer.
 - `webapp/` — geliştirici arayüzü
