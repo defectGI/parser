@@ -4,4 +4,6 @@ openpyxl>=3.1      # xlsx
 python-docx>=1.1   # docx
 python-pptx>=0.6   # pptx
 python-dotenv>=1.0 # loads .env for llm/ config (LLM_PROVIDER, LLM_API_KEY, ...)
-# pdf: deferred — a separate strategy will be decided later.
+pdfplumber>=0.11   # pdf (text layer, tables; rendering via bundled pypdfium2)
+# optional: pytesseract + the system tesseract binary — scanned-pdf text
+# detector (consensus source). Without it the scanned path leans on VLM2_*.

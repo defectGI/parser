@@ -1,0 +1,56 @@
+SCOPE
+=====
+Proje ne yapıyor: docx, pptx, xlsx, html, markdown, pdf dosyalarını ortak bir
+IR'a (ParsedDocument) çevirir; tabloyu yapılandırır, görseli işaretler,
+başlık/liste/biçimlendirme bilgisini korur.
+
+docx
+----
+Başlıkları (gerçek stil + formatla taklit edilmiş), kalın/italik/altçizili/
+üstü çizili/üst-alt simge biçimlendirmesini, listeleri, tabloları (iç içe
+tablo ve hücre içi görsel dahil), formülleri (yaklaşık metin olarak) ve
+görselleri (eski ve yeni formatlar dahil) okur.
+
+pptx
+----
+Başlıkları (gerçek + formatla taklit edilmiş), kalın/italik/altçizili/üstü
+çizili biçimlendirmesini, listeleri, tabloları, görselleri, gömülü Excel/Word
+nesnelerini (önizleme olarak) ve slayt notlarını okur. Grafik/SmartArt okumaz.
+Tablo hücresi içindeki biçimlendirmeyi henüz okumaz.
+
+xlsx
+----
+Her sayfayı bir tablo olarak okur, birleştirilmiş hücreleri ve sayfaya
+gömülü resimleri çıkarır. Formülü değil, sadece son hesaplanmış değeri okur.
+Grafik/pivot tablo okumaz, hücre biçimlendirmesini okumaz.
+
+html
+----
+Başlık, paragraf, liste, tablo (iç içe tablo ve hücre içi görsel dahil) ve
+kalın/italik/altçizili/üstü çizili biçimlendirmeyi okur; <pre> içeriğini
+aynen korur. Tablo hücresi içindeki biçimlendirmeyi henüz okumaz.
+
+markdown
+--------
+Başlık (ATX ve setext), liste, tablo, görsel ve kalın/italik/üstü çizili
+biçimlendirmeyi okur. Alıntı (`>`), referans linkleri ve satır içi HTML'i
+henüz okumaz.
+
+pdf
+---
+Sayfanın dijital mi taranmış mı olduğuna bakar; gerekirse görsel-dil
+modeliyle okur ve bağımsız bir kaynakla doğrular (metin, tablo
+birleşmeleri ve görseller için). Gömülü fotoğraf/diyagramlar hem dijital
+hem taranmış sayfalarda okuma sırasındaki gerçek konumuyla ImageBlock
+olarak çıkar; geometrik karşılığı bulunamayan bir figür "unverified"
+işaretlenir ve sessizce kaybolmaz — VLM figür için kendi bbox tahminini
+verdiyse crop o tahmine sıkılaşır, vermediyse sayfa geneli kırpıma düşer.
+Dijital (code path) sayfalarda kalın/italik, kelimenin kendi font adından
+(docx'teki run stilini okumanın PDF karşılığı) deterministik olarak okunur;
+VLM'in okuduğu (hybrid/scanned) sayfalarda bu bilgi henüz okunmaz.
+
+Diğer aşamalar
+--------------
+images/: henüz yazılmadı.
+tables/: yazıldı, tabloya açıklama üretiyor.
+webapp/: henüz yazılmadı.

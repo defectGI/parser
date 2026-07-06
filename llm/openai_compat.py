@@ -8,9 +8,11 @@ the core has no third-party HTTP dependency.
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 
 from .base import LLMError
 
@@ -42,11 +44,27 @@ class OpenAICompatClient:
         self.extra_body = extra_body or {}
 
     def complete(self, *, system: str, user: str, max_tokens: int = 1024) -> str:
+        return self._chat(system=system, user_content=user, max_tokens=max_tokens)
+
+    def complete_vision(self, *, system: str, user: str,
+                        images: Sequence[tuple[str, bytes]],
+                        max_tokens: int = 2048) -> str:
+        # Multimodal user turn: text part + one data-URI image part per image.
+        # The data-URI `image_url` shape is the de-facto standard understood by
+        # OpenAI, vLLM, Ollama, LM Studio and OpenRouter alike.
+        content: list[dict] = [{"type": "text", "text": user}]
+        for mime, data in images:
+            b64 = base64.b64encode(data).decode("ascii")
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        return self._chat(system=system, user_content=content, max_tokens=max_tokens)
+
+    def _chat(self, *, system: str, user_content, max_tokens: int) -> str:
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "user", "content": user_content},
             ],
             "max_tokens": max_tokens,
             "temperature": 0,

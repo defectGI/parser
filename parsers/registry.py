@@ -12,6 +12,7 @@ from .base import BaseParser
 from .docx_parser import DocxParser
 from .html_parser import HtmlParser
 from .markdown_parser import MarkdownParser
+from .pdf_parser import PdfParser
 from .pptx_parser import PptxParser
 from .xlsx_parser import XlsxParser
 
@@ -22,6 +23,7 @@ _PARSERS: list[type[BaseParser]] = [
     XlsxParser,
     DocxParser,
     PptxParser,
+    PdfParser,
 ]
 
 

@@ -8,6 +8,9 @@ Credentials resolve through the SDK's own chain (ANTHROPIC_API_KEY, then an
 
 from __future__ import annotations
 
+import base64
+from collections.abc import Sequence
+
 from .base import LLMError
 
 # Opus 4.8 and the rest of the 4.6+ family reject a `temperature` argument, so
@@ -29,12 +32,28 @@ class AnthropicClient:
         self._client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
 
     def complete(self, *, system: str, user: str, max_tokens: int = 1024) -> str:
+        return self._send(system=system, content=user, max_tokens=max_tokens)
+
+    def complete_vision(self, *, system: str, user: str,
+                        images: Sequence[tuple[str, bytes]],
+                        max_tokens: int = 2048) -> str:
+        # Images first, then the text — the ordering Anthropic recommends.
+        content: list[dict] = [
+            {"type": "image",
+             "source": {"type": "base64", "media_type": mime,
+                        "data": base64.b64encode(data).decode("ascii")}}
+            for mime, data in images
+        ]
+        content.append({"type": "text", "text": user})
+        return self._send(system=system, content=content, max_tokens=max_tokens)
+
+    def _send(self, *, system: str, content, max_tokens: int) -> str:
         try:
             msg = self._client.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
                 system=system,
-                messages=[{"role": "user", "content": user}],
+                messages=[{"role": "user", "content": content}],
             )
         except Exception as exc:  # SDK raises many concrete types; normalize them.
             raise LLMError(f"anthropic request failed: {exc}") from exc

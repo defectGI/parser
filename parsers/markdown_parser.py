@@ -5,16 +5,27 @@ Works directly on the raw bytes so every block's `Span` points at the exact byte
 range in the source file (part=None => the raw file itself).
 
 Supported constructs (phase 1 scope, GFM-ish):
-* ATX headings (`#`..`######`)
+* ATX headings (`#`..`######`) and setext headings (a single text line followed
+  by a `===`/`---` underline; a multi-line setext heading text is not detected —
+  it falls back to a plain paragraph, same as before)
 * fenced code blocks (``` / ~~~) — kept as a paragraph, so `#`/`|` inside code
   are not misread as headings/tables
-* pipe tables (header + `---` separator + rows) -> TableBlock
+* pipe tables (header + `---` separator + rows) -> TableBlock; cells may escape
+  a literal pipe as `\\|` and may contain `![alt](src)` images
 * lists (`-`/`*`/`+`/`1.`/`1)`), nested by indent -> blocks carrying list_* metadata
 * images `![alt](src)` -> `<imageN>` marker in text + a real ImageBlock
+* inline emphasis -> `runs` (see base.py's Mark/InlineRun): `**bold**`/`__bold__`,
+  `*italic*`, `***bold+italic***`/`___bold+italic___`, `~~strike~~`. Deliberately
+  NOT nested (a bold span's own content is not re-scanned for italic inside it)
+  and single-underscore italic (`_word_`) is intentionally not matched — too
+  prone to false positives inside snake_case_identifiers/urls/file_names that
+  are common in real documents. `text` is always the delimiter-stripped clean
+  view (join(r.text for r in runs) == text, matching every other parser).
 * everything else -> ParagraphBlock
 
-Not handled yet (left for later): blockquotes, setext headings, reference links,
-inline HTML, escaped pipes inside table cells.
+Not handled yet (left for later): blockquotes, reference-style links/images
+(`[text][ref]`), inline HTML, nested/overlapping emphasis, multi-line setext
+heading text.
 """
 
 from __future__ import annotations
@@ -24,16 +35,69 @@ import re
 from pathlib import Path
 
 from .base import (
-    BaseParser, ParsedDocument, Span, text_cell,
+    BaseParser, ParsedDocument, Span, Cell, text_cell,
     HeadingBlock, ParagraphBlock, TableBlock, ImageBlock, TableData,
+    Mark, InlineRun, finalize_runs, runs_have_marks,
 )
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_SETEXT = re.compile(r"^(=+|-+)[ \t]*$")
 _LIST = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
 _ORDERED = re.compile(r"\d+[.)]")
 _IMAGE = re.compile(r'!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)')
 _MARKER = re.compile(r"<image\d+>")
 _FENCE = ("```", "~~~")
+_ESCAPED_PIPE = "\x00ESCPIPE\x00"
+
+# Lightweight, non-nested inline emphasis. Named-group backreferences
+# (`(?P=name)`) tie each delimiter to its own closing match; only the winning
+# alternative's groups are non-None on a given match.
+_EMPH = re.compile(
+    r"(?P<bi>\*\*\*|___)(?P<bi_txt>.+?)(?P=bi)"
+    r"|(?P<b>\*\*|__)(?P<b_txt>.+?)(?P=b)"
+    r"|(?P<i>\*)(?P<i_txt>[^\s*](?:.*?[^\s*])?)(?P=i)"
+    r"|(?P<st>~~)(?P<st_txt>.+?)(?P=st)",
+    re.DOTALL,
+)
+
+
+def _parse_inline(text: str) -> tuple[str, list[InlineRun]]:
+    """Split `text` into InlineRuns on the emphasis markers above.
+
+    Returns (clean_text, runs) where clean_text has the delimiters stripped and
+    equals "".join(r.text for r in runs) — the same invariant docx/pptx already
+    maintain. `runs` is the full run list (caller gates on `runs_have_marks`
+    before attaching it to a block, same as every other parser).
+    """
+    runs: list[InlineRun] = []
+    pos = 0
+    for m in _EMPH.finditer(text):
+        if m.start() < pos:
+            continue  # nested inside an already-matched span; skip (no nesting)
+        if m.start() > pos:
+            runs.append(InlineRun(text[pos:m.start()]))
+        if m.group("bi") is not None:
+            runs.append(InlineRun(m.group("bi_txt"), (Mark.BOLD, Mark.ITALIC)))
+        elif m.group("b") is not None:
+            runs.append(InlineRun(m.group("b_txt"), (Mark.BOLD,)))
+        elif m.group("i") is not None:
+            runs.append(InlineRun(m.group("i_txt"), (Mark.ITALIC,)))
+        else:
+            runs.append(InlineRun(m.group("st_txt"), (Mark.STRIKE,)))
+        pos = m.end()
+    if pos < len(text):
+        runs.append(InlineRun(text[pos:]))
+    runs = finalize_runs(runs)
+    return "".join(r.text for r in runs), runs
+
+
+def _inline_cell(text: str) -> "Cell | None":
+    """Like `text_cell`, but resolves inline emphasis into the cell's runs."""
+    if not text:
+        return text_cell(text)
+    clean, runs = _parse_inline(text)
+    marked = runs if runs_have_marks(runs) else []
+    return Cell(blocks=[ParagraphBlock(id="", text=clean, runs=marked)])
 
 
 def _has_text(text: str) -> bool:
@@ -55,13 +119,17 @@ def _is_table_sep(line: str) -> bool:
 
 
 def _split_row(line: str) -> list[str]:
-    """Split a pipe-table row into trimmed cell strings."""
+    """Split a pipe-table row into trimmed cell strings.
+
+    A `\\|` inside a cell is a literal pipe, not a column separator (GFM).
+    """
     s = line.strip()
     if s.startswith("|"):
         s = s[1:]
     if s.endswith("|"):
         s = s[:-1]
-    return [c.strip() for c in s.split("|")]
+    s = s.replace("\\|", _ESCAPED_PIPE)
+    return [c.strip().replace(_ESCAPED_PIPE, "|") for c in s.split("|")]
 
 
 class MarkdownParser(BaseParser):
@@ -124,6 +192,28 @@ class MarkdownParser(BaseParser):
                     **list_meta,
                 ))
 
+        def resolve_cell_images(cell_text: str, row_start: int, row_end: int) -> str:
+            """Replace `![alt](src)` in a table cell with `<imageN>` + ImageBlock.
+
+            Cell-splitting already discards a cell's column position within its
+            source line, so (unlike `resolve_images`) this uses the whole row's
+            byte range as the image's Span — a Karar B best-effort approximation,
+            same spirit as pptx/pdf/xlsx's page-or-element-level spans.
+            """
+            nonlocal img_n
+
+            def repl(m: re.Match) -> str:
+                nonlocal img_n
+                img_n += 1
+                alt = m.group(1) or None
+                src = m.group(2)
+                blocks.append(ImageBlock(
+                    id=next_id(), span=Span(byte_start=row_start, byte_end=row_end),
+                    image_index=img_n, locator={"src": src}, alt_text=alt))
+                return f"<image{img_n}>"
+
+            return _IMAGE.sub(repl, cell_text)
+
         i = 0
         n = len(lines)
         while i < n:
@@ -157,30 +247,49 @@ class MarkdownParser(BaseParser):
             # --- heading ---
             m = _HEADING.match(text)
             if m:
+                clean, runs = _parse_inline(m.group(2).strip())
                 blocks.append(HeadingBlock(
                     id=next_id(), span=Span(byte_start=start, byte_end=end),
-                    text=m.group(2).strip(), level=len(m.group(1))))
+                    text=clean, level=len(m.group(1)),
+                    runs=runs if runs_have_marks(runs) else []))
                 i += 1
                 continue
 
             # --- pipe table ---
             if "|" in text and i + 1 < n and _is_table_sep(lines[i + 1][2]):
-                rows = [_split_row(text)]
+                row_recs = [(start, end, _split_row(text))]
                 blk_end = lines[i + 1][1]
                 j = i + 2
                 while j < n and lines[j][2].strip() and "|" in lines[j][2]:
-                    rows.append(_split_row(lines[j][2]))
+                    row_recs.append((lines[j][0], lines[j][1], _split_row(lines[j][2])))
                     blk_end = lines[j][1]
                     j += 1
-                ncols = max(len(r) for r in rows)
-                for r in rows:
-                    r.extend([""] * (ncols - len(r)))
+                ncols = max(len(cells) for _, _, cells in row_recs)
+                table_rows = []
+                for r_start, r_end, cells in row_recs:
+                    cells = cells + [""] * (ncols - len(cells))
+                    table_rows.append(
+                        [resolve_cell_images(c, r_start, r_end) for c in cells])
                 blocks.append(TableBlock(
                     id=next_id(), span=Span(byte_start=start, byte_end=blk_end),
-                    table=TableData(n_rows=len(rows), n_cols=ncols,
-                                    cells=[[text_cell(x) for x in r]
-                                           for r in rows])))
+                    table=TableData(n_rows=len(table_rows), n_cols=ncols,
+                                    cells=[[_inline_cell(x) for x in r]
+                                           for r in table_rows])))
                 i = j
+                continue
+
+            # --- setext heading (single text line + === / --- underline) ---
+            if (i + 1 < n and not _LIST.match(text)
+                    and lines[i + 1][2].strip()
+                    and _SETEXT.match(lines[i + 1][2].strip())):
+                level = 1 if lines[i + 1][2].strip()[0] == "=" else 2
+                clean, runs = _parse_inline(stripped)
+                blk_end = lines[i + 1][1]
+                blocks.append(HeadingBlock(
+                    id=next_id(), span=Span(byte_start=start, byte_end=blk_end),
+                    text=clean, level=level,
+                    runs=runs if runs_have_marks(runs) else []))
+                i += 2
                 continue
 
             # --- list (contiguous run shares one list_id) ---
@@ -196,9 +305,11 @@ class MarkdownParser(BaseParser):
                     item_text, found = resolve_images(lt, ls, lm.start(3))
                     item_text = item_text.strip()
                     if _has_text(item_text):
+                        clean, runs = _parse_inline(item_text)
                         blocks.append(ParagraphBlock(
                             id=next_id(), span=Span(byte_start=ls, byte_end=le),
-                            text=item_text, **meta))
+                            text=clean, runs=runs if runs_have_marks(runs) else [],
+                            **meta))
                     emit_images(found, meta)
                     i += 1
                 continue
@@ -226,9 +337,10 @@ class MarkdownParser(BaseParser):
                 all_found.extend(found)
             para_text = "\n".join(out_lines).strip()
             if _has_text(para_text):
+                clean, runs = _parse_inline(para_text)
                 blocks.append(ParagraphBlock(
                     id=next_id(), span=Span(byte_start=p_start, byte_end=p_end),
-                    text=para_text))
+                    text=clean, runs=runs if runs_have_marks(runs) else []))
             emit_images(all_found, {})
 
         return ParsedDocument(

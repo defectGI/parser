@@ -25,6 +25,13 @@ Design decisions
   inside a list item (a table/image in a `<li>`) as a real TableBlock/ImageBlock instead
   of flattening it away. A "list" is reconstructed by grouping blocks that share a
   `list_id`.
+* Provenance is additive metadata on any block. Deterministic parsers leave it
+  None; the pdf parser labels every text-bearing block with how its content was
+  obtained/confirmed: "text-layer-verified" (matched the PDF's own text layer),
+  "consensus-verified" (two independent readers agreed), or "unverified"
+  (could not be confirmed — `source_crop` then holds the sha256 of a page/region
+  render in the blob store so the content can be audited). The citation pipeline
+  reads its trust level from this tag.
 * Inline formatting is additive, not a new tree. A text block keeps its plain `text`
   (the canonical view every consumer already uses) and gains an OPTIONAL `runs` list
   of `InlineRun`s carrying semantic marks (bold/italic/underline/strike/super/sub);
@@ -253,6 +260,15 @@ class Block:
         0-based nesting depth of the item (docx w:ilvl analogue).
     list_ordered
         True => numbered item, False => bullet. May vary per item within a list.
+
+    Provenance (see module docstring): both fields are None for deterministic
+    formats; the pdf parser fills them.
+
+    provenance
+        "text-layer-verified" | "consensus-verified" | "unverified".
+    source_crop
+        sha256 of a page/region render in the blob store (storage/images/)
+        backing an unverified block, for human audit.
     """
 
     id: str
@@ -262,6 +278,9 @@ class Block:
     list_level: int | None = None
     list_ordered: bool | None = None
 
+    provenance: str | None = None
+    source_crop: str | None = None
+
     # Subclasses override this.
     type: BlockType = field(init=False, default=BlockType.PARAGRAPH)
 
@@ -270,7 +289,8 @@ class Block:
         span = self.span.to_dict()
         if span:
             d["span"] = span
-        for key in ("list_id", "list_level", "list_ordered"):
+        for key in ("list_id", "list_level", "list_ordered",
+                    "provenance", "source_crop"):
             val = getattr(self, key)
             if val is not None:
                 d[key] = val
@@ -285,6 +305,8 @@ class Block:
             "list_id": data.get("list_id"),
             "list_level": data.get("list_level"),
             "list_ordered": data.get("list_ordered"),
+            "provenance": data.get("provenance"),
+            "source_crop": data.get("source_crop"),
         }
 
     def to_dict(self) -> dict[str, Any]:  # pragma: no cover - overridden

@@ -10,6 +10,9 @@ JSON'ına geri yazılır. Ham görsel byte'ı JSON'a gömülmez, sadece `image_i
 
 Chunklama, RAPTOR ve chunk şeması bu deponun kapsamı dışındadır; parser yalnızca IR üretir.
 
+Her format şu an ne yapabiliyor için: [`SCOPE.txt`](SCOPE.txt). Bilinen açık sorunların
+kısa hatırlatma listesi için: [`EKSIKLER.txt`](EKSIKLER.txt).
+
 ## Pipeline
 
 1. `storage/raw/` — girdi dosyası olduğu gibi korunur.
