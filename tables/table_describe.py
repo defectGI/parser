@@ -19,6 +19,9 @@ Environment flags (all optional, sensible defaults):
     TABLE_CONTEXT_AFTER     paragraphs to include after the table (default 1)
     TABLE_CONTEXT_MAX_CHARS per-paragraph context budget (default 400)
     TABLE_CHECK_RETRIES     max description attempts when checking (default 3)
+    TABLE_CONCURRENCY      tables described in parallel (default 4) -- each
+                            describe/check call is a blocking HTTP request, so
+                            threads overlap network wait time across tables
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from llm import LLMClient, get_client
 from parsers.base import (
@@ -189,11 +193,60 @@ def _check(client: LLMClient, table_text: str, context: str, description: str) -
     return parsed
 
 
+def _describe_one(client: LLMClient, doc: ParsedDocument, idx: int, *,
+                   use_check: bool, use_context: bool, max_chars: int,
+                   before: int, after: int, max_attempts: int) -> None:
+    """Describe (and optionally verify+retry) a single table, mutating its
+    block in place. Independent of every other table -- safe to run
+    concurrently since each call only touches its own `idx`."""
+    block: TableBlock = doc.blocks[idx]
+    table_text = render_table(block.table)
+    if not table_text.strip():
+        # No extractable cell text (e.g. a geometry-only region pdfplumber
+        # mistook for a table) -- asking the LLM to describe nothing invites
+        # a plausible-sounding fabrication instead of a faithful description,
+        # and the checker can't verify content against an empty table either.
+        block.table_description = None
+        block.describe_status = "empty"
+        block.describe_attempts = 0
+        return
+    context = (
+        build_context(doc.blocks, idx, max_chars, before, after)
+        if use_context
+        else ""
+    )
+
+    hint = ""
+    passed = False
+    attempts = 0
+    description = ""
+    while attempts < max_attempts:
+        attempts += 1
+        description = _describe(client, table_text, context, hint)
+        if not use_check:
+            break
+        verdict = _check(client, table_text, context, description)
+        passed = bool(verdict.get("content_ok")) and bool(verdict.get("format_ok"))
+        if passed:
+            break
+        hint = str(verdict.get("reason") or "").strip()
+
+    block.table_description = description
+    if use_check:
+        block.describe_status = "ok" if passed else "flagged"
+        block.describe_attempts = attempts
+
+
 def describe_tables(doc: ParsedDocument, client: LLMClient | None = None) -> ParsedDocument:
     """Fill `table_description` (and, when checking, describe_status/attempts).
 
     Mutates `doc` in place and returns it. No-op when the document has no
     tables — so no client/network is needed for table-free documents.
+
+    Tables are described concurrently (see TABLE_CONCURRENCY): each table's
+    describe/check/retry loop is a handful of blocking HTTP calls, and tables
+    don't depend on each other's results, so threads overlap the network wait
+    instead of paying for it table-by-table.
     """
     table_indices = [i for i, b in enumerate(doc.blocks) if isinstance(b, TableBlock)]
     if not table_indices:
@@ -208,34 +261,18 @@ def describe_tables(doc: ParsedDocument, client: LLMClient | None = None) -> Par
     before = max(0, _env_int("TABLE_CONTEXT_BEFORE", 1))
     after = max(0, _env_int("TABLE_CONTEXT_AFTER", 1))
     max_attempts = max(1, _env_int("TABLE_CHECK_RETRIES", 3)) if use_check else 1
+    max_workers = max(1, _env_int("TABLE_CONCURRENCY", 4))
 
-    for idx in table_indices:
-        block: TableBlock = doc.blocks[idx]
-        table_text = render_table(block.table)
-        context = (
-            build_context(doc.blocks, idx, max_chars, before, after)
-            if use_context
-            else ""
-        )
-
-        hint = ""
-        passed = False
-        attempts = 0
-        description = ""
-        while attempts < max_attempts:
-            attempts += 1
-            description = _describe(client, table_text, context, hint)
-            if not use_check:
-                break
-            verdict = _check(client, table_text, context, description)
-            passed = bool(verdict.get("content_ok")) and bool(verdict.get("format_ok"))
-            if passed:
-                break
-            hint = str(verdict.get("reason") or "").strip()
-
-        block.table_description = description
-        if use_check:
-            block.describe_status = "ok" if passed else "flagged"
-            block.describe_attempts = attempts
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(_describe_one, client, doc, idx,
+                        use_check=use_check, use_context=use_context,
+                        max_chars=max_chars, before=before, after=after,
+                        max_attempts=max_attempts)
+            for idx in table_indices
+        ]
+        for f in futures:
+            f.result()  # re-raise the first failure; matches the old
+                        # sequential behavior of aborting describe_tables
 
     return doc

@@ -1,5 +1,5 @@
-"""storage/output/*.json ile corpus_docx/*.docx eslesenleri review/<doc_id>/
-altina kopyalar. LLM'i tekrar cagirmaz; sadece var olan dosyalari eslestirir.
+"""Copies storage/output/*.json entries that match corpus_docx/*.docx files into
+review/<doc_id>/. Does not call the LLM again; it only pairs up existing files.
 
 Kullanim:
     python scripts/pair_review.py

@@ -36,6 +36,9 @@ Environment (all optional):
     IMAGE_OCR_MAX_TOKENS  VLM transcription token budget (default 1024)
     PDF_RENDER_DPI        page render resolution for pdf crops (default 150;
                            shared with parsers/pdf_parser.py for consistency)
+    IMAGE_CONCURRENCY     images fetched/OCR'd in parallel (default 4) -- each
+                          is a blocking HTTP call, so threads overlap network
+                          wait time across images
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ import io
 import mimetypes
 import os
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -175,12 +179,21 @@ def _fetch_pdf_region(raw_path: Path, locator: dict[str, Any], cache: dict):
     if png is None:
         import pdfplumber
 
-        try:
-            with pdfplumber.open(raw_path) as pdf:
-                png = pdf.pages[page_no - 1].to_image(resolution=dpi).original
-        except Exception:
-            return None
-        cache[key] = png
+        from parsers.pdf_lock import PDFIUM_LOCK
+
+        # Holds the lock across both the cache check and the render so two
+        # threads racing on the same page don't double-render, and so this
+        # never overlaps another thread's pdfplumber.open() elsewhere
+        # (PDFium itself isn't safe to touch from multiple threads at once).
+        with PDFIUM_LOCK:
+            png = cache.get(key)
+            if png is None:
+                try:
+                    with pdfplumber.open(raw_path) as pdf:
+                        png = pdf.pages[page_no - 1].to_image(resolution=dpi).original
+                except Exception:
+                    return None
+                cache[key] = png
     scale = dpi / 72.0
     x0, top, x1, bottom = bbox
     box = tuple(round(v) for v in (x0 * scale, top * scale, x1 * scale, bottom * scale))
@@ -208,6 +221,41 @@ def _ocr_via_vlm(vlm: VLMClient, data: bytes, mime: str) -> str:
     return "" if text == "NO_TEXT" else text
 
 
+def _process_image(block: ImageBlock, *, fetch: Fetcher, raw_path: Path,
+                    vlm: VLMClient | None, llm: LLMClient | None) -> None:
+    """Resolve a single ImageBlock, mutating it in place. Independent of every
+    other image -- safe to run concurrently, one block per thread."""
+    fetched = fetch(raw_path, block.locator)
+    if fetched is None:
+        return
+    data, mime = fetched
+    mime = mime or block.mime
+    block.image_id = _store_blob(data, mime)
+    block.mime = mime
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            block.width, block.height = img.size
+    except Exception:
+        pass
+
+    if vlm is None:
+        return
+    try:
+        raw_text = _ocr_via_vlm(vlm, data, mime or "image/png")
+    except LLMError:
+        return
+    if not raw_text:
+        block.ocr_meaningful = False
+        return
+
+    if llm is None:
+        return
+    meaningful, cleaned = check_ocr_text(llm, raw_text)
+    block.ocr_meaningful = meaningful
+    if meaningful:
+        block.ocr_text = cleaned
+
+
 def handle_images(doc: ParsedDocument, vlm: VLMClient | None = None,
                    llm: LLMClient | None = None) -> ParsedDocument:
     """Fill every unresolved ImageBlock's image_id/mime/width/height, and --
@@ -219,6 +267,11 @@ def handle_images(doc: ParsedDocument, vlm: VLMClient | None = None,
     running it after a partial failure) neither re-fetches nor re-OCRs it.
     No-op when the document has no unresolved images, so no client/network
     is needed for image-free documents.
+
+    Images are resolved concurrently (see IMAGE_CONCURRENCY): fetch+OCR+check
+    per image is a couple of blocking HTTP calls, and images don't depend on
+    each other, so threads overlap the network wait instead of paying for it
+    image-by-image.
     """
     images = [im for im in _collect_images(doc) if im.image_id is None]
     if not images:
@@ -229,48 +282,25 @@ def handle_images(doc: ParsedDocument, vlm: VLMClient | None = None,
         return doc
     raw_path = Path(doc.source_path)
 
-    vlm_unavailable = False
-    llm_unavailable = False
-
-    for block in images:
-        fetched = fetch(raw_path, block.locator)
-        if fetched is None:
-            continue
-        data, mime = fetched
-        mime = mime or block.mime
-        block.image_id = _store_blob(data, mime)
-        block.mime = mime
+    if vlm is None:
         try:
-            with Image.open(io.BytesIO(data)) as img:
-                block.width, block.height = img.size
-        except Exception:
-            pass
-
-        if vlm is None and not vlm_unavailable:
-            try:
-                vlm = get_vlm_client()
-            except LLMError:
-                vlm_unavailable = True
-        if vlm is None:
-            continue
-        try:
-            raw_text = _ocr_via_vlm(vlm, data, mime or "image/png")
+            vlm = get_vlm_client()
         except LLMError:
-            continue
-        if not raw_text:
-            block.ocr_meaningful = False
-            continue
+            vlm = None
+    if llm is None:
+        try:
+            llm = get_client()
+        except LLMError:
+            llm = None
 
-        if llm is None and not llm_unavailable:
-            try:
-                llm = get_client()
-            except LLMError:
-                llm_unavailable = True
-        if llm is None:
-            continue
-        meaningful, cleaned = check_ocr_text(llm, raw_text)
-        block.ocr_meaningful = meaningful
-        if meaningful:
-            block.ocr_text = cleaned
+    max_workers = max(1, _env_int("IMAGE_CONCURRENCY", 4))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(_process_image, block, fetch=fetch, raw_path=raw_path,
+                        vlm=vlm, llm=llm)
+            for block in images
+        ]
+        for f in futures:
+            f.result()
 
     return doc

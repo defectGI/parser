@@ -1,62 +1,61 @@
 SCOPE
 =====
-Proje ne yapıyor: docx, pptx, xlsx, html, markdown, pdf dosyalarını ortak bir
-IR'a (ParsedDocument) çevirir; tabloyu yapılandırır, görseli işaretler,
-başlık/liste/biçimlendirme bilgisini korur.
+What the project does: converts docx, pptx, xlsx, html, markdown, pdf files into a common
+IR (ParsedDocument); structures tables, marks images, and preserves heading/list/formatting
+information.
 
 docx
 ----
-Başlıkları (gerçek stil + formatla taklit edilmiş), kalın/italik/altçizili/
-üstü çizili/üst-alt simge biçimlendirmesini, listeleri, tabloları (iç içe
-tablo ve hücre içi görsel dahil), formülleri (yaklaşık metin olarak) ve
-görselleri (eski ve yeni formatlar dahil) okur.
+Reads headings (real style + style mimicked via formatting), bold/italic/underline/
+strikethrough/superscript-subscript formatting, lists, tables (including nested tables and
+in-cell images), formulas (as approximate text), and images (including legacy and modern
+formats).
 
 pptx
 ----
-Başlıkları (gerçek + formatla taklit edilmiş), kalın/italik/altçizili/üstü
-çizili biçimlendirmesini, listeleri, tabloları, görselleri, gömülü Excel/Word
-nesnelerini (önizleme olarak) ve slayt notlarını okur. Grafik/SmartArt okumaz.
-Tablo hücresi içindeki biçimlendirmeyi henüz okumaz.
+Reads headings (real + style mimicked via formatting), bold/italic/underline/strikethrough
+formatting, lists, tables, images, embedded Excel/Word objects (as previews), and slide notes.
+Does not read charts/SmartArt. Does not yet read formatting inside table cells.
 
 xlsx
 ----
-Her sayfayı bir tablo olarak okur, birleştirilmiş hücreleri ve sayfaya
-gömülü resimleri çıkarır. Formülü değil, sadece son hesaplanmış değeri okur.
-Grafik/pivot tablo okumaz, hücre biçimlendirmesini okumaz.
+Reads each sheet as a table, extracting merged cells and images embedded in the sheet. Reads
+only the last calculated value, not the formula. Does not read charts/pivot tables, does not
+read cell formatting.
 
 html
 ----
-Başlık, paragraf, liste, tablo (iç içe tablo ve hücre içi görsel dahil) ve
-kalın/italik/altçizili/üstü çizili biçimlendirmeyi okur; <pre> içeriğini
-aynen korur. Tablo hücresi içindeki biçimlendirmeyi henüz okumaz.
+Reads headings, paragraphs, lists, tables (including nested tables and in-cell images), and
+bold/italic/underline/strikethrough formatting; preserves `<pre>` content verbatim. Does not
+yet read formatting inside table cells.
 
 markdown
 --------
-Başlık (ATX ve setext), liste, tablo, görsel ve kalın/italik/üstü çizili
-biçimlendirmeyi okur. Alıntı (`>`), referans linkleri ve satır içi HTML'i
-henüz okumaz.
+Reads headings (ATX and setext), lists, tables, images, and bold/italic/strikethrough
+formatting. Does not yet read blockquotes (`>`), reference links, or inline HTML.
 
 pdf
 ---
-Sayfanın dijital mi taranmış mı olduğuna bakar; gerekirse görsel-dil
-modeliyle okur ve bağımsız bir kaynakla doğrular (metin, tablo
-birleşmeleri ve görseller için). Gömülü fotoğraf/diyagramlar hem dijital
-hem taranmış sayfalarda okuma sırasındaki gerçek konumuyla ImageBlock
-olarak çıkar; geometrik karşılığı bulunamayan bir figür "unverified"
-işaretlenir ve sessizce kaybolmaz — VLM figür için kendi bbox tahminini
-verdiyse crop o tahmine sıkılaşır, vermediyse hiç crop üretilmez. Kalın/italik
-kelimenin kendi font adından (docx'teki run stilini okumanın PDF karşılığı)
-deterministik olarak okunur; dijital sayfalarda (code path) doğrudan, VLM'in
-okuduğu dijital sayfalarda (hybrid) text-layer'a doğrulanmış metne geriye
-dönük hizalanarak. Taranmış sayfalarda (scanned, gerçek text layer yok) bu
-bilgi okunmaz. Başlık seviyesi (1-6), font büyüklüğüne göre doküman geneli
-sıralanır — aynı font büyüklüğü dokümanın neresinde geçerse geçsin aynı
-seviyeye denk gelir, tek bir sayfaya göre değil.
+Checks whether a page is digital or scanned; reads it with a vision-language model when
+necessary and verifies it against an independent source (for text, table merges, and images).
+Embedded photos/diagrams are emitted as ImageBlocks with their true position at read time, on
+both digital and scanned pages; a figure with no geometric counterpart is marked "unverified"
+and does not silently disappear — if the VLM supplied its own bbox guess for the figure, the
+crop is tightened to that guess; if it didn't, no crop is produced at all. Bold/italic is read
+deterministically from the run's own font name (the PDF equivalent of reading run style in
+docx): directly on digital pages (code path), and on digital pages read by the VLM (hybrid) by
+aligning back to the text-layer-verified text. This information is not read on scanned pages
+(scanned, no real text layer). Heading level (1-6) is ranked document-wide by font size — the
+same font size maps to the same level wherever it occurs in the document, not relative to a
+single page.
 
-Diğer aşamalar
---------------
-images/: her görseli (tablo hücresi içindekiler dahil) kaynağından bulup sha256 ile
-saklar; VLM ile OCR'a sokar, anlamlıysa düzeltilmiş metni görselin kendi kaydına yazar.
-Uzak (http/https) görsel adreslerini çözmez.
-tables/: yazıldı, tabloya açıklama üretiyor.
-webapp/: henüz yazılmadı.
+Other stages
+------------
+images/: locates every image (including ones inside table cells) at its source and stores it by
+sha256; runs it through OCR with a VLM, and if meaningful, writes the corrected text into the
+image's own record. Does not resolve remote (http/https) image addresses.
+tables/: implemented, generates table descriptions. With the optional `tables/structure/`, can
+read the table grid (cell bbox/rowspan/colspan) from a separate model (VLM, TableFormer, or an
+http service — `TABLE_STRUCT_PROVIDER`); falls back to geometric table detection if not
+configured.
+webapp/: not yet implemented.

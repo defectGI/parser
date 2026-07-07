@@ -1,5 +1,5 @@
 # storage/images/
 
-Görsellerin immutable blob store'u. Adresleme sha256 (`image_id`) ile yapılır; aynı görsel
-tekrar geçerse tek kopya tutulur (dedup). Ham görsel byte'ı parse IR'ına gömülmez, sadece
-buradan `image_id` referansıyla taşınır.
+The immutable blob store for images. Addressed by sha256 (`image_id`); if the same image
+occurs again, only one copy is kept (dedup). Raw image bytes are never embedded in the parse
+IR — they're only carried from here via the `image_id` reference.

@@ -1,5 +1,5 @@
 """xlsx_parser.py: embedded pictures (xl/drawings) extraction and the
-numeric (not lexicographic) sheetN.xml ordering fix (see EKSIKLER.txt #6).
+numeric (not lexicographic) sheetN.xml ordering fix.
 """
 
 from __future__ import annotations

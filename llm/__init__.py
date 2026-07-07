@@ -13,7 +13,7 @@ in three prefixes; `VLM_*` falls back to `LLM_*` per variable (a single
 configured multimodal model serves both roles), `VLM2_*` never falls back (the
 secondary verifier must be an independently chosen model):
     {LLM,VLM,VLM2}_PROVIDER  "openai" (default, any OpenAI-compatible server)
-                             | "openrouter" | "anthropic"
+                             | "openrouter" | "ollama" | "local" | "anthropic"
     {LLM,VLM,VLM2}_MODEL     model id (required for openai; defaults to opus
                              for anthropic)
     {LLM,VLM,VLM2}_BASE_URL  API root, required for the openai provider (.../v1)
@@ -37,7 +37,7 @@ def get_client() -> LLMClient:
     return _build_client("LLM")
 
 
-def get_vlm_client(role: str = "primary") -> VLMClient:
+def get_vlm_client(role: str = "primary", model: str | None = None) -> VLMClient:
     """Construct a vision `VLMClient` from environment variables.
 
     role="primary"    reads `VLM_*`, falling back to `LLM_*` per variable.
@@ -45,14 +45,22 @@ def get_vlm_client(role: str = "primary") -> VLMClient:
                       secondary model independently re-reads suspicious regions
                       (consensus check), so silently reusing the primary would
                       defeat its purpose.
+    model             overrides the env-configured model id, same
+                      provider/base_url/api_key otherwise -- for a caller
+                      whose task differs enough from the role's usual job
+                      (e.g. tables/structure/vlm_adapter.py's grid/bbox
+                      extraction vs. this role's normal OCR transcription)
+                      that a different model on the same server may fit
+                      better. Leave unset to use the role's own model as
+                      configured.
     """
     if role == "primary":
-        return _build_client("VLM", fallback="LLM")
+        return _build_client("VLM", fallback="LLM", model_override=model)
     if role == "secondary":
         load_dotenv()
         if not (os.getenv("VLM2_PROVIDER") or os.getenv("VLM2_MODEL")):
             raise LLMError("secondary VLM not configured (set VLM2_* variables)")
-        return _build_client("VLM2")
+        return _build_client("VLM2", model_override=model)
     raise ValueError(f"unknown VLM role: {role!r}")
 
 
@@ -64,11 +72,12 @@ def _env(prefix: str, name: str, fallback: str | None) -> str | None:
     return val or None
 
 
-def _build_client(prefix: str, fallback: str | None = None):
+def _build_client(prefix: str, fallback: str | None = None,
+                  model_override: str | None = None):
     """Build an adapter from `{prefix}_*` environment variables."""
     load_dotenv()  # no-op if there's no .env file; never overrides a set env var
     provider = (_env(prefix, "PROVIDER", fallback) or "openai").strip().lower()
-    model = _env(prefix, "MODEL", fallback)
+    model = model_override or _env(prefix, "MODEL", fallback)
     api_key = _env(prefix, "API_KEY", fallback)
 
     if provider == "anthropic":
@@ -77,9 +86,16 @@ def _build_client(prefix: str, fallback: str | None = None):
         return AnthropicClient(model=model, api_key=api_key)
 
     # Known OpenAI-compatible hosts get a default base URL so *_BASE_URL is optional.
-    _COMPAT_DEFAULT_URL = {"openrouter": "https://openrouter.ai/api/v1"}
+    # "ollama" is its own recognized name (not just an alias for "local") so
+    # scripts/config that key off the literal provider string -- e.g.
+    # ensure_ollama_models.py's is_ollama_target -- agree with what actually
+    # builds the client.
+    _COMPAT_DEFAULT_URL = {
+        "openrouter": "https://openrouter.ai/api/v1",
+        "ollama": "http://localhost:11434/v1",
+    }
     if provider in ("openai", "openai-compat", "openai_compatible", "local",
-                    "openrouter"):
+                    "openrouter", "ollama"):
         base_url = _env(prefix, "BASE_URL", fallback) or _COMPAT_DEFAULT_URL.get(provider)
         if not base_url:
             raise LLMError(f"{prefix}_BASE_URL is required for the openai provider")

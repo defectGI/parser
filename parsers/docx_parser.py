@@ -14,7 +14,7 @@ Paragraph/cell content is read by `_walk_para`, which walks a w:p in document or
 * text from both w:t and Office Math m:t (math is no longer dropped);
 * inline formatting from each run's w:rPr (bold/italic/underline/strike/super/sub)
   -> `InlineRun`s on the block's `runs` (plain `text` stays the canonical view; only
-  direct rPr is read, style-inherited marks are not resolved yet — see EKSIKLER);
+  direct rPr is read, style-inherited marks are not resolved yet);
 * images from both modern DrawingML (a:blip r:embed) and legacy/OLE VML
   (v:imagedata r:id) -> `<imageN>` marker + ImageBlock (locator = media part path,
   image_handler fetches bytes later). Under mc:AlternateContent only the Choice
@@ -102,7 +102,7 @@ def _run_marks(r) -> tuple[Mark, ...]:
     """Semantic inline marks of a w:r, read from its direct w:rPr.
 
     Only direct run properties are read; style-inherited formatting (rPr on the
-    paragraph/character style) is not resolved yet — see EKSIKLER.
+    paragraph/character style) is not resolved yet.
     """
     rpr = r.find(_W_RPR)
     if rpr is None:

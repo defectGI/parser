@@ -37,7 +37,12 @@ Design decisions
   of `InlineRun`s carrying semantic marks (bold/italic/underline/strike/super/sub);
   `"".join(r.text for r in runs) == text`. Unformatted blocks store no `runs` (no JSON
   bloat). Only semantic marks are modeled — super/subscript because flattening them
-  corrupts meaning (x² vs x2). Populated by docx; other parsers pending (see EKSIKLER).
+  corrupts meaning (x² vs x2). Populated by docx; other parsers pending.
+* `heading_path` gives every block its section breadcrumb (ancestor heading texts,
+  outermost first) without requiring consumers to walk the flat block stream looking
+  for the nearest preceding heading at each level. A parser builds this with a
+  `HeadingStack` (below) as it emits blocks in reading order. None where a parser
+  hasn't been wired to populate it yet, or for blocks before the first heading.
 """
 
 from __future__ import annotations
@@ -53,7 +58,9 @@ from typing import Any
 # v2: a table cell is no longer a bare string but a `Cell` (list of blocks), so a
 # cell can hold nested tables/paragraphs losslessly. Readers still accept v1 (a
 # cell serialized as a plain string) — see `_cell_from_dict`.
-IR_VERSION = 2
+# v3: `Block.heading_path` added (ancestor heading texts). Absent/None on a block
+# reads the same as "not populated by this parser yet" — no migration needed.
+IR_VERSION = 3
 
 
 class BlockType(str, Enum):
@@ -261,6 +268,12 @@ class Block:
     list_ordered
         True => numbered item, False => bullet. May vary per item within a list.
 
+    heading_path
+        Ancestor heading texts, outermost first (e.g. ["MIL-STD-1553 Bus
+        Couplers", "Product Overview"]) — see module docstring, "heading_path".
+        None if this parser doesn't populate it, or the block precedes any
+        heading.
+
     Provenance (see module docstring): both fields are None for deterministic
     formats; the pdf parser fills them.
 
@@ -278,6 +291,8 @@ class Block:
     list_level: int | None = None
     list_ordered: bool | None = None
 
+    heading_path: list[str] | None = None
+
     provenance: str | None = None
     source_crop: str | None = None
 
@@ -290,7 +305,7 @@ class Block:
         if span:
             d["span"] = span
         for key in ("list_id", "list_level", "list_ordered",
-                    "provenance", "source_crop"):
+                    "heading_path", "provenance", "source_crop"):
             val = getattr(self, key)
             if val is not None:
                 d[key] = val
@@ -305,6 +320,7 @@ class Block:
             "list_id": data.get("list_id"),
             "list_level": data.get("list_level"),
             "list_ordered": data.get("list_ordered"),
+            "heading_path": data.get("heading_path"),
             "provenance": data.get("provenance"),
             "source_crop": data.get("source_crop"),
         }
@@ -345,6 +361,31 @@ class HeadingBlock(Block):
                    runs=[InlineRun.from_dict(r) for r in data.get("runs", [])])
 
 
+class HeadingStack:
+    """Tracks the current ancestor-heading breadcrumb while a parser emits
+    blocks in reading order, for populating `Block.heading_path`.
+
+    Call `enter(level, text)` for every heading as it's emitted (this also
+    returns that heading's own `heading_path`, i.e. its ancestors), and read
+    `path()` for every other block. A level-N heading closes any open heading
+    at level >= N, mirroring how heading nesting works in every format here
+    (docx outline levels, pdf font-size ranks, pptx placeholder levels, ...).
+    """
+
+    def __init__(self) -> None:
+        self._stack: list[tuple[int, str]] = []
+
+    def enter(self, level: int, text: str) -> list[str] | None:
+        path = self.path()
+        while self._stack and self._stack[-1][0] >= level:
+            self._stack.pop()
+        self._stack.append((level, text))
+        return path
+
+    def path(self) -> list[str] | None:
+        return [text for _, text in self._stack] if self._stack else None
+
+
 @dataclass
 class ParagraphBlock(Block):
     text: str = ""
@@ -370,7 +411,9 @@ class TableBlock(Block):
     table: TableData = field(default_factory=lambda: TableData(0, 0))
     # Filled by tables/table_describe.py; all None at parse time.
     table_description: str | None = None
-    # LLM-check outcome (no separate DB): "ok" | "flagged" | None (check not run).
+    # LLM-check outcome (no separate DB):
+    # "ok" | "flagged" | "empty" (no extractable cell text, LLM never called)
+    # | None (check not run).
     describe_status: str | None = None
     describe_attempts: int | None = None
 

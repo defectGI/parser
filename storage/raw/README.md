@@ -1,4 +1,4 @@
 # storage/raw/
 
-Ham girdi dosyaları burada tutulur. Parser bu dosyaları okur; işlem bitince de silmez,
-orijinal doküman olduğu gibi korunur.
+Raw input files are kept here. The parser reads these files; it does not delete them once
+processing finishes — the original document is preserved as-is.

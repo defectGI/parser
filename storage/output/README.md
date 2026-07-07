@@ -1,9 +1,9 @@
 # storage/output/
 
-Nihai IR (`ParsedDocument`), JSON dosyası (`{doc_id}.json`) olarak burada tutulur. Parser
-çıktısı önce buraya yazılır; `images/` ve `tables/` aşamalarının zenginleştirmeleri (OCR
-metni, tablo açıklaması, LLM check durumu vb.) aynı IR'a geri işlenir. Ayrı bir veritabanı
-yoktur — tüm sonuç ve durum bu dosyalarda yaşar.
+The final IR (`ParsedDocument`) is kept here as a JSON file (`{doc_id}.json`). The parser's
+output is written here first; enrichments from the `images/` and `tables/` stages (OCR text,
+table description, LLM check status, etc.) are then processed back into the same IR. There is
+no separate database — all results and state live in these files.
 
-Ham görsel byte'ı buraya gömülmez; görsel yalnızca `image_id` (sha256) ile referanslanır,
-byte'ın kendisi `storage/images/` blob store'unda tutulur.
+Raw image bytes are not embedded here; an image is only referenced by its `image_id` (sha256),
+with the bytes themselves kept in the `storage/images/` blob store.

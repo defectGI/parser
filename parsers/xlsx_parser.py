@@ -17,7 +17,7 @@ when Pillow isn't installed (openpyxl's `find_images` early-returns if
 `PILImage` failed to import) and doesn't retain the media part path anyway
 (`Image.ref` is a BytesIO, not "xl/media/imageN.png"). Native charts
 (c:chart) and SmartArt-equivalents are out of scope here too, same call as
-pptx's chart/SmartArt gap (see EKSIKLER) -- a `graphicFrame` anchor with no
+pptx's chart/SmartArt gap -- a `graphicFrame` anchor with no
 `xdr:pic` child is simply skipped.
 """
 

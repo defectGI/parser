@@ -5,5 +5,17 @@ python-docx>=1.1   # docx
 python-pptx>=0.6   # pptx
 python-dotenv>=1.0 # loads .env for llm/ config (LLM_PROVIDER, LLM_API_KEY, ...)
 pdfplumber>=0.11   # pdf (text layer, tables; rendering via bundled pypdfium2)
+pillow>=10         # images/image_handler.py's blob metadata + tables/structure's
+                   # TABLE_STRUCT_PROVIDER=vlm crop-and-encode step
 # optional: pytesseract + the system tesseract binary — scanned-pdf text
 # detector (consensus source). Without it the scanned path leans on VLM2_*.
+# optional: pymupdf — only needed when TABLE_STRUCT_PROVIDER is configured
+# (tables/structure/); pulls exact digital-layer cell text for a
+# table-structure model's detected bboxes (see pdf_parser.py's
+# _digital_text_in_bbox). Not required otherwise.
+# pymupdf>=1.24
+# optional: docling-ibm-models — only needed for TABLE_STRUCT_PROVIDER=tableformer
+# (tables/structure/tableformer_adapter.py). No other provider needs it.
+# TABLE_STRUCT_PROVIDER=vlm needs nothing extra -- reuses llm/ (already
+# stdlib-only) and pillow (already required above).
+# docling-ibm-models

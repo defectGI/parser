@@ -1,37 +1,41 @@
 # parser
 
-Farklı dosya formatlarını (docx, pptx, xlsx, html, pdf, markdown) ortak bir ara temsile
-(IR — `ParsedDocument`) çeviren, görselleri OCR'dan geçirip anlamlılığını doğrulayan ve
-tabloları yapılandırıp açıklayan modüler bir parser.
+A modular parser that converts different file formats (docx, pptx, xlsx, html, pdf, markdown)
+into a common intermediate representation (IR — `ParsedDocument`), runs images through OCR to
+verify their meaningfulness, and structures and describes tables.
 
-IR, JSON olarak serileştirilir (`storage/output/` altında `.json` dosyaları). Görsel OCR'ı ve
-tablo açıklaması gibi tüm zenginleştirme sonuçları ayrı bir veritabanı yerine doğrudan bu IR
-JSON'ına geri yazılır. Ham görsel byte'ı JSON'a gömülmez, sadece `image_id` referansı taşınır.
+The IR is serialized as JSON (`.json` files under `storage/output/`). All enrichment results —
+image OCR, table description, etc. — are written back directly into this IR JSON rather than
+into a separate database. Raw image bytes are never embedded in the JSON; only an `image_id`
+reference is carried.
 
-Chunklama, RAPTOR ve chunk şeması bu deponun kapsamı dışındadır; parser yalnızca IR üretir.
+Chunking, RAPTOR, and the chunk schema are out of scope for this repo; the parser only produces
+the IR.
 
-Her format şu an ne yapabiliyor için: [`SCOPE.txt`](SCOPE.txt). Bilinen açık sorunların
-kısa hatırlatma listesi için: [`EKSIKLER.txt`](EKSIKLER.txt).
+For what each format can currently do, see [`SCOPE.txt`](SCOPE.txt).
 
 ## Pipeline
 
-1. `storage/raw/` — girdi dosyası olduğu gibi korunur.
-2. `parsers/` — dosya tipine uygun parser, ortak `ParsedDocument` IR'ına çevirir → `storage/output/`.
-3. `images/` — parse sırasında konan `<imageN>` işaretlerini OCR'dan geçirir, anlamlılığını LLM
-   ile doğrular, sonucu IR'da işaretin yerine yazar. Ham görsel `storage/images/` blob store'da
-   sha256 (`image_id`) ile immutable ve dedup'lı saklanır; kaydın kendisi IR'da `ImageBlock`
-   üzerinde durur.
-4. `tables/` — yapılandırılmış tablo bloklarına kısa bir açıklama (`table_description`) ekler,
-   sonucu LLM check'ten geçirir; sonuç IR'daki `TableBlock`'a yazılır.
-5. `webapp/` — geliştirici arayüzü; parser aşamalarını adım adım, dur-kalk modunda gösterir.
+1. `storage/raw/` — the input file is kept as-is.
+2. `parsers/` — the parser appropriate to the file type converts it to the common
+   `ParsedDocument` IR → `storage/output/`.
+3. `images/` — runs the `<imageN>` markers placed during parsing through OCR, verifies their
+   meaningfulness with an LLM, and writes the result back into the IR in place of the marker.
+   The raw image is stored immutably and deduplicated by sha256 (`image_id`) in the
+   `storage/images/` blob store; the record itself lives on the `ImageBlock` in the IR.
+4. `tables/` — adds a short description (`table_description`) to structured table blocks and
+   runs the result through an LLM check; the result is written to the `TableBlock` in the IR.
+5. `webapp/` — a developer interface that shows the parser stages step by step, in a
+   start-stop mode.
 
-## Klasörler
+## Folders
 
-- `parsers/` — format bazlı parser'lar + `BaseParser`/`ParsedDocument` sözleşmesi
-- `images/` — `image_handler` ve `ocr_output_control`
-- `tables/` — `table_describe`
-- `storage/` — ham veri (`raw/`), sonuç IR çıktısı (`output/`), görsel blob store (`images/`);
-  bu üç yol hardcoded değil, `storage_paths.py` üzerinden `STORAGE_RAW_DIR` /
-  `STORAGE_OUTPUT_DIR` / `STORAGE_IMAGES_DIR` env değişkenleriyle değiştirilebilir
-  (bkz. `.env.example`) — yoksa buradaki dev-time varsayılanlara düşer.
-- `webapp/` — geliştirici arayüzü
+- `parsers/` — format-specific parsers + the `BaseParser`/`ParsedDocument` contract
+- `images/` — `image_handler` and `ocr_output_control`
+- `tables/` — `table_describe`; `tables/structure/` is optional table-grid detection
+  (`TABLE_STRUCT_PROVIDER=vlm|tableformer|http`, see `tables/structure/__init__.py`)
+- `storage/` — raw data (`raw/`), resulting IR output (`output/`), image blob store (`images/`);
+  these three paths are not hardcoded — they can be overridden via the `STORAGE_RAW_DIR` /
+  `STORAGE_OUTPUT_DIR` / `STORAGE_IMAGES_DIR` env variables through `storage_paths.py`
+  (see `.env.example`) — otherwise they fall back to the dev-time defaults here.
+- `webapp/` — developer interface

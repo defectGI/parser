@@ -1,13 +1,13 @@
 # webapp/
 
-Geliştirici arayüzü. Parser pipeline'ının her aşamasını (raw → parse → image handling →
-table describe) adım adım, net ve sade bir şekilde gösterir.
+Developer interface. Shows every stage of the parser pipeline (raw → parse → image handling →
+table describe) step by step, clearly and simply.
 
-- Dur-kalk modu: her aşama bir butona tıklanmayı bekler; aşama bitince durur, sonuçlar
-  gösterilir; butona tekrar tıklanınca sıradaki aşamaya geçilir.
-- Sonuçlar gezilebilir olmalı: örn. bir görsele referans veren metne tıklanınca ilgili
-  görsele/konuma yönlenebilmeli.
-- Tasarım: sade, az renkli, net, temiz, açıklayıcı.
+- Start-stop mode: each stage waits for a button click; once a stage finishes, it stops and
+  shows the results; clicking the button again moves on to the next stage.
+- Results should be navigable: e.g. clicking text that references an image should be able to
+  jump to that image/location.
+- Design: simple, low on color, clear, clean, self-explanatory.
 
-Not: bu arayüz yalnızca parser aşamalarını kapsar; chunklama/RAPTOR aşamaları bu deponun
-kapsamı dışındadır.
+Note: this interface only covers the parser stages; the chunking/RAPTOR stages are out of
+scope for this repo.

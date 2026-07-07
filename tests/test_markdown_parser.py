@@ -1,5 +1,5 @@
 """markdown_parser.py: setext headings, escaped pipes, table-cell images,
-and inline bold/italic/strike -> runs (see parsers/README.md, EKSIKLER.txt).
+and inline bold/italic/strike -> runs (see parsers/README.md).
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""DOCX extraction fixes for the EKSIKLER items:
+"""DOCX extraction fixes for known gaps:
 
 1. Office Math (OMML m:t) text — was dropped because only w:t was read.
 3. Legacy/OLE images (VML v:imagedata r:id) — were ignored (only a:blip handled).

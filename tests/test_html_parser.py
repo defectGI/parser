@@ -1,6 +1,6 @@
 """html_parser.py: inline formatting -> runs, <pre> whitespace preservation, and
 nested table / cell image preserved as real blocks in Cell.blocks (see
-parsers/README.md, EKSIKLER.txt #7).
+parsers/README.md).
 """
 
 from __future__ import annotations

@@ -91,16 +91,28 @@ from PIL import Image
 
 from llm import LLMError, VLMClient, get_vlm_client
 from storage_paths import images_dir
+from tables.structure import (
+    TableStructureClient, TableStructureError, TextCellHint,
+    get_table_structure_client,
+)
+
+from .pdf_lock import PDFIUM_LOCK
 
 from .base import (
     BaseParser, ParsedDocument, Span, text_cell,
-    Block, HeadingBlock, ImageBlock, ParagraphBlock, TableBlock, TableData,
-    Merge, Mark, InlineRun, finalize_runs, runs_have_marks,
+    Block, HeadingBlock, HeadingStack, ImageBlock, ParagraphBlock, TableBlock,
+    TableData, Merge, Mark, InlineRun, finalize_runs, runs_have_marks,
 )
 
 PROV_TEXT_LAYER = "text-layer-verified"
 PROV_CONSENSUS = "consensus-verified"
 PROV_UNVERIFIED = "unverified"
+# Row/column grid came from a table-structure model's visual inference rather
+# than deterministic line geometry, but every cell's text was still pulled
+# straight from the PDF's own digital text layer (see _digital_text_in_bbox)
+# -- as trustworthy as PROV_TEXT_LAYER content-wise, tagged separately for
+# transparency about where the grid itself came from.
+PROV_TABLE_STRUCTURE = "table-structure-model"
 
 _UNSET = object()  # sentinel: "resolve from environment lazily"
 
@@ -586,6 +598,21 @@ def _cluster_lines(words: list[dict]) -> list[_Line]:
     return out
 
 
+# A pdfplumber-detected "table" this small in both dimensions is never real
+# tabular content in this corpus -- it's a decorative vector mark (e.g. a
+# footer logo) whose bounding box happens to close into a 1-2 cell grid.
+# Real tables always span a meaningful fraction of the page in at least one
+# dimension, so gating on *both* being tiny avoids dropping a legitimate
+# single-row-tall or single-column-wide table.
+_MIN_TABLE_WIDTH = 20.0
+_MIN_TABLE_HEIGHT = 12.0
+
+
+def _is_degenerate_table(t) -> bool:
+    x0, top, x1, bottom = t.bbox
+    return (x1 - x0) < _MIN_TABLE_WIDTH and (bottom - top) < _MIN_TABLE_HEIGHT
+
+
 def _find_gutter(words: list[dict], page_width: float) -> float | None:
     """X coordinate of a two-column gutter, or None for single-column pages.
 
@@ -626,8 +653,18 @@ def _find_gutter(words: list[dict], page_width: float) -> float | None:
 
 
 # A line starting like a bullet / numbered item. The marker is stripped from
-# the text; membership goes to list_* metadata (see base.py, "Lists").
-_BULLET_RE = re.compile(r"^\s*([•◦▪‣●○∙·*–—-]|\d{1,3}[.)]|[A-Za-z][.)])\s+")
+# the text; membership goes to list_* metadata (see base.py, "Lists"). The
+# dotted-numbering branch (`\d{1,3}(?:\.\d{1,3}){1,4}\.?`) matches multi-level
+# numbering like "1.1 " or "2.3.4 " without requiring trailing punctuation --
+# the internal dots between digit groups are themselves the signal, mirroring
+# heading_heuristics._NUM_PREFIX (used for the same shape in docx headings).
+# A bare single number still needs trailing "." or ")" (`\d{1,3}[.)]`) since
+# nothing else marks it as a list item rather than the start of a sentence.
+_BULLET_RE = re.compile(
+    r"^\s*([•◦▪‣●○∙·*–—-]"
+    r"|\d{1,3}(?:\.\d{1,3}){1,4}\.?"
+    r"|\d{1,3}[.)]"
+    r"|[A-Za-z][.)])\s+")
 
 
 @dataclass
@@ -827,6 +864,52 @@ def _table_to_data(table) -> TableData:
     return TableData(n_rows=nrows, n_cols=ncols, cells=grid, merges=merges)
 
 
+@dataclass
+class _PreparedTable:
+    """A table whose `TableData` is already fully built (by
+    `_structure_model_tables`, bypassing `_table_to_data`'s pdfplumber-geometry
+    reconstruction). `bbox` is in the same PDF-point coordinate space as
+    pdfplumber's own `Table.bbox`, so the existing reading-order code in
+    `_parse_code`/`_blocks_from_vlm` that reads `.bbox` works on either kind
+    of table without change."""
+
+    bbox: tuple[float, float, float, float]
+    data: TableData
+
+
+def _as_table_data(t) -> TableData:
+    """`t` is either a pdfplumber `Table` (needs reconstruction) or a
+    `_PreparedTable` (already built) -- the single seam _parse_code and
+    _blocks_from_vlm both go through, so neither cares which detector a
+    table came from."""
+    return t.data if isinstance(t, _PreparedTable) else _table_to_data(t)
+
+
+def _digital_text_in_bbox(raw_path: Path, pageno: int,
+                          bbox_pdf_pts: tuple[float, float, float, float]) -> str:
+    """Exact digital text inside `bbox_pdf_pts` (PDF point coordinates, page
+    `pageno`, 1-indexed) -- used to fill in a table-structure model's cells
+    with real PDF text instead of the model's own (OCR-risked) reading.
+    Never raises: a PDF with no digital text there (or any extraction
+    hiccup) just yields an empty cell, same as a genuinely blank cell would.
+
+    Deliberately does NOT take PDFIUM_LOCK: this is called from inside
+    `_structure_model_tables` -> `_triage`, which already runs under
+    `parse()`'s own PDFIUM_LOCK (a plain, non-reentrant Lock) -- acquiring it
+    again here would deadlock. PyMuPDF (MuPDF) is a separate native library
+    from pypdfium2/pdfplumber with its own independent state, so it doesn't
+    need that lock's protection anyway.
+    """
+    import fitz  # PyMuPDF -- lazy: only this feature needs it installed
+
+    try:
+        with fitz.open(raw_path) as pdf:
+            page = pdf[pageno - 1]
+            return page.get_text("text", clip=fitz.Rect(*bbox_pdf_pts)).strip()
+    except Exception:
+        return ""
+
+
 def _page_images(page) -> list[dict]:
     """Embedded raster objects worth keeping (tiny decorations skipped)."""
     out = []
@@ -883,13 +966,15 @@ class PdfParser(BaseParser):
 
     def __init__(self, *, vlm: VLMClient | None = _UNSET,
                  vlm2: VLMClient | None = _UNSET,
-                 detector: TextDetector | None = _UNSET) -> None:
-        # All three are injectable for tests; the _UNSET sentinel means
+                 detector: TextDetector | None = _UNSET,
+                 table_struct: TableStructureClient | None = _UNSET) -> None:
+        # All four are injectable for tests; the _UNSET sentinel means
         # "resolve lazily from the environment on first use" while an explicit
         # None disables that component outright.
         self._vlm = vlm
         self._vlm2 = vlm2
         self._detector = detector
+        self._table_struct = table_struct
         self._vlm_failures = 0
 
     # -- component resolution --------------------------------------------
@@ -916,6 +1001,19 @@ class PdfParser(BaseParser):
                     self._vlm2 = None
         return self._vlm2
 
+    def _table_structure(self) -> TableStructureClient | None:
+        """None means "not configured" -- unset TABLE_STRUCT_PROVIDER (the
+        default) or a bad config, either way callers fall back to
+        find_tables(). A live but momentarily-failing client raises
+        TableStructureError per-call instead; that's handled where it's
+        actually invoked (_structure_model_tables), not here."""
+        if self._table_struct is _UNSET:
+            try:
+                self._table_struct = get_table_structure_client()
+            except TableStructureError:
+                self._table_struct = None
+        return self._table_struct
+
     def _get_detector(self) -> TextDetector | None:
         if self._detector is _UNSET:
             self._detector = _default_detector()
@@ -931,9 +1029,9 @@ class PdfParser(BaseParser):
         blocks: list[Block] = []
         page_meta: list[dict[str, Any]] = []
 
-        with pdfplumber.open(raw_path) as pdf:
+        with PDFIUM_LOCK, pdfplumber.open(raw_path) as pdf:
             page_count = len(pdf.pages)
-            triaged = [(pageno, page, *self._triage(page))
+            triaged = [(pageno, page, *self._triage(page, pageno, raw_path))
                       for pageno, page in enumerate(pdf.pages, start=1)]
 
             # Heading levels rank font sizes once across the whole document,
@@ -964,6 +1062,17 @@ class PdfParser(BaseParser):
                     blocks.extend(self._parse_scanned(page, pageno, ct, meta))
                 page_meta.append(meta)
 
+        # heading_path: one pass over the whole document in final reading
+        # order (pages/columns/routes are already flattened into `blocks`
+        # correctly by this point), so a heading on page N still parents
+        # blocks on page N+1 until closed by an equal-or-higher-level one.
+        stack = HeadingStack()
+        for b in blocks:
+            if isinstance(b, HeadingBlock):
+                b.heading_path = stack.enter(b.level, b.text)
+            else:
+                b.heading_path = stack.path()
+
         return ParsedDocument(
             doc_id=doc_id,
             source_path=str(raw_path),
@@ -978,7 +1087,8 @@ class PdfParser(BaseParser):
 
     # -- triage -------------------------------------------------------------
 
-    def _triage(self, page) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    def _triage(self, page, pageno: int, raw_path: Path
+               ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         """Route one page: "empty" | "code" | "hybrid" | "scanned"."""
         words = page.extract_words(extra_attrs=["size", "fontname"])
         n_chars = len(page.chars)
@@ -992,6 +1102,7 @@ class PdfParser(BaseParser):
 
         tables: list = []
         gutter: float | None = None
+        png: bytes | None = None
         if n_chars == 0 and img_frac < 0.2:
             route = "empty"
         elif n_chars < 20 and img_frac >= 0.2:
@@ -999,14 +1110,31 @@ class PdfParser(BaseParser):
         elif img_frac > 0.8 and text_frac < 0.05:
             route = "scanned"  # thin/partial OCR layer glued onto a scan
         else:
-            tables = page.find_tables()
+            # find_tables() still LOCATES table regions (a structure model
+            # like TableFormer refines the grid within a region, it doesn't
+            # discover regions itself) -- so this always runs; a configured
+            # structure model then takes each found region and rebuilds its
+            # row/column grid properly (fixing find_tables()'s line-geometry
+            # blind spots: dropped rows/headers when ruling lines are
+            # incomplete), instead of trusting _table_to_data's geometric
+            # reconstruction.
+            geom_tables = [t for t in page.find_tables() if not _is_degenerate_table(t)]
+            tables = geom_tables
+            if geom_tables and self._table_structure() is not None:
+                png = self._render(page)
+                refined = self._structure_model_tables(
+                    page, pageno, raw_path, png, geom_tables)
+                if refined is not None:  # None only on model failure this page
+                    tables = refined
             gutter = _find_gutter(words, float(page.width))
             route = "hybrid" if (tables or gutter is not None) else "code"
 
         info = {"chars": n_chars,
                 "text_coverage": round(text_frac, 3),
                 "image_coverage": round(img_frac, 3)}
-        prep = {"words": words, "tables": tables, "gutter": gutter}
+        # `png`: the render _structure_model_tables already needed, if any --
+        # _parse_hybrid reuses it instead of rendering the same page twice.
+        prep = {"words": words, "tables": tables, "gutter": gutter, "png": png}
         return route, info, prep
 
     # -- code path -----------------------------------------------------------
@@ -1045,8 +1173,9 @@ class PdfParser(BaseParser):
                 entries.append((ci, sp.top, b))
 
         for t in tables:
+            prov = PROV_TABLE_STRUCTURE if isinstance(t, _PreparedTable) else PROV_TEXT_LAYER
             b = TableBlock(id="", span=Span(page=pageno),
-                           table=_table_to_data(t), provenance=PROV_TEXT_LAYER)
+                           table=_as_table_data(t), provenance=prov)
             entries.append((col_of((t.bbox[0] + t.bbox[2]) / 2), t.bbox[1], b))
 
         for im in _page_images(page):
@@ -1118,6 +1247,66 @@ class PdfParser(BaseParser):
         img.save(buf, format="PNG")
         return buf.getvalue()
 
+    def _structure_model_tables(self, page, pageno: int, raw_path: Path,
+                                png: bytes, geom_tables: list
+                                ) -> list["_PreparedTable"] | None:
+        """Refine `geom_tables` (pdfplumber's found table regions) via the
+        configured table-structure model -- "structure from the model, text
+        from the code": the model rebuilds each region's row/column grid
+        (fixing find_tables()'s line-geometry blind spots: dropped rows/
+        headers when ruling lines are incomplete), but every cell's text is
+        still pulled straight from the PDF's own digital layer via
+        `_digital_text_in_bbox`, never from the model's own reading of the
+        bitmap, so a visual misread can never corrupt cell content. Returns
+        None (not []) on any failure so the caller falls back to
+        `geom_tables` unrefined -- None and "found zero tables" must stay
+        distinguishable.
+        """
+        client = self._table_structure()
+        if client is None:
+            return None
+
+        dpi = _env_int("PDF_RENDER_DPI", 150)
+        to_px = dpi / 72.0
+        to_pt = 72.0 / dpi
+
+        table_bboxes_px = [tuple(v * to_px for v in t.bbox) for t in geom_tables]
+
+        text_cells = [
+            TextCellHint(
+                text=w["text"],
+                bbox=(w["x0"] * to_px, w["top"] * to_px,
+                     w["x1"] * to_px, w["bottom"] * to_px),
+            )
+            for w in page.extract_words(extra_attrs=["size", "fontname"])
+        ]
+
+        try:
+            detected = client.detect(png, table_bboxes=table_bboxes_px,
+                                     text_cells=text_cells)
+        except TableStructureError:
+            return None
+
+        prepared: list[_PreparedTable] = []
+        for dt in detected:
+            if not dt.cells:
+                continue
+            n_rows = max(c.row + c.rowspan for c in dt.cells)
+            n_cols = max(c.col + c.colspan for c in dt.cells)
+            cells: list[list[Any]] = [[None] * n_cols for _ in range(n_rows)]
+            merges: list[Merge] = []
+            for c in dt.cells:
+                bbox_pt = tuple(v * to_pt for v in c.bbox)
+                text = _digital_text_in_bbox(raw_path, pageno, bbox_pt)
+                cells[c.row][c.col] = text_cell(text)
+                if c.rowspan > 1 or c.colspan > 1:
+                    merges.append(Merge(row=c.row, col=c.col,
+                                        rowspan=c.rowspan, colspan=c.colspan))
+            data = TableData(n_rows=n_rows, n_cols=n_cols, cells=cells, merges=merges)
+            table_bbox_pt = tuple(v * to_pt for v in dt.bbox)
+            prepared.append(_PreparedTable(bbox=table_bbox_pt, data=data))
+        return prepared
+
     def _blocks_from_vlm(self, specs: list[dict[str, Any]], pageno: int,
                          ct: _Counters, geom_tables: list | None = None,
                          geom_images: list[dict] | None = None,
@@ -1188,7 +1377,7 @@ class PdfParser(BaseParser):
                                          image_index=ct.img(), locator=locator))
             else:  # table
                 if table_i < len(geom_tables):
-                    table = _table_to_data(geom_tables[table_i])
+                    table = _as_table_data(geom_tables[table_i])
                 else:
                     rows = sp["rows"]
                     n_cols = max(len(r) for r in rows)
@@ -1211,7 +1400,7 @@ class PdfParser(BaseParser):
             meta["note"] = "no VLM configured; code-path fallback"
             return self._parse_code(page, pageno, prep, ct, heading_sizes)
 
-        png = self._render(page)
+        png = prep.get("png") or self._render(page)
         grounding = page.extract_text() or ""
         specs = self._read_page(vlm, png, _hybrid_user(pageno, grounding))
         if specs is None:

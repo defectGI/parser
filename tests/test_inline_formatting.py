@@ -2,7 +2,7 @@
 
 The IR keeps `text` as the canonical plain view and adds an optional parallel
 `runs` list carrying the semantic marks. `"".join(r.text for r in runs) == text`.
-DOCX populates it from w:rPr; other parsers do not yet (see EKSIKLER).
+DOCX populates it from w:rPr; other parsers do not yet.
 """
 
 from __future__ import annotations
