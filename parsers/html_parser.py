@@ -18,8 +18,10 @@ Handled:
   -> bold, `<i>`/`<em>` -> italic, `<u>` -> underline, `<s>`/`<strike>`/`<del>`
   -> strike, `<sup>`/`<sub>` -> super/subscript. Not applied inside table cells
   (cell text stays plain, same as before) or fenced/pre content.
-* pre -> ParagraphBlock with whitespace preserved verbatim (not collapsed like
-  every other text block)
+* a[href] -> a run carrying `link=href` (see base.py's InlineRun); the visible
+  anchor text stays in the block text. Not applied inside table cells.
+* pre -> `CodeBlock` with whitespace preserved verbatim; a `language-x`/`lang-x`
+  class on the `<pre>` or its inner `<code>` becomes the `language` hint
 
 Known limitations (v1): inline formatting inside a table cell is not modeled
 (cell text stays plain, matching the pre-existing behavior for cells).
@@ -34,9 +36,12 @@ from pathlib import Path
 
 from .base import (
     BaseParser, ParsedDocument, Span, Cell, Block,
-    HeadingBlock, ParagraphBlock, TableBlock, ImageBlock, TableData, Merge,
+    HeadingBlock, ParagraphBlock, CodeBlock, TableBlock, ImageBlock, TableData, Merge,
     Mark, InlineRun, finalize_runs, runs_have_marks,
 )
+
+# `<pre><code class="language-python">` / `class="lang-python"` -> language hint
+_CODE_LANG = re.compile(r"lang(?:uage)?-(\S+)")
 
 _MARKER = re.compile(r"<image\d+>")
 _WS = re.compile(r"(\s+)")
@@ -60,14 +65,16 @@ def _has_text(text: str) -> bool:
     return bool(_MARKER.sub("", text).strip())
 
 
-def _collapse_ws_runs(chunks: list[str], chunk_marks: list[tuple]) -> list[InlineRun]:
+def _collapse_ws_runs(chunks: list[str], chunk_marks: list[tuple],
+                      chunk_links: list[str | None]) -> list[InlineRun]:
     """Collapse whitespace across `chunks` the same way
     ``" ".join("".join(chunks).split())`` would (the old behavior), while
-    keeping each non-whitespace token's active marks so word boundaries survive
-    an inline `<b>`/`<i>`/... tag straddling a `handle_data` call boundary."""
+    keeping each non-whitespace token's active marks + link so word boundaries
+    survive an inline `<b>`/`<i>`/`<a>`/... tag straddling a `handle_data` call
+    boundary."""
     parts: list[InlineRun] = []
     pending_space = False
-    for chunk, marks in zip(chunks, chunk_marks):
+    for chunk, marks, link in zip(chunks, chunk_marks, chunk_links):
         for tok in _WS.split(chunk):
             if not tok:
                 continue
@@ -77,7 +84,7 @@ def _collapse_ws_runs(chunks: list[str], chunk_marks: list[tuple]) -> list[Inlin
             if pending_space and parts:
                 parts.append(InlineRun(" "))
             pending_space = False
-            parts.append(InlineRun(tok, marks))
+            parts.append(InlineRun(tok, marks, link))
     return finalize_runs(parts)
 
 
@@ -143,19 +150,23 @@ class _Builder(HTMLParser):
         self.blocks: list = []
         self._bid = 0
         self._img = 0
-        # current text buffer (parallel lists: chunk text + its active marks)
+        # current text buffer (parallel lists: chunk text + its active marks + link)
         self.buf: list[str] = []
         self.buf_marks: list[tuple] = []
+        self.buf_links: list[str | None] = []
         self.buf_start: int | None = None
         self.buf_end: int | None = None
         self.pending: list[tuple[int, str | None, str, int, int]] = []
         self.heading_level: int | None = None
         # inline formatting: stack of currently-open <b>/<i>/... marks
         self.mark_stack: list[Mark] = []
+        # <a href>: stack of currently-open link targets (None for a bare <a>)
+        self.link_stack: list[str | None] = []
         # <pre>: raw (uncollapsed) text buffer, active only while in_pre
         self.in_pre = False
         self.pre_buf: list[str] = []
         self.pre_start: int | None = None
+        self.pre_lang: str | None = None
         # list nesting: stack of `ordered` bools; one list_id per outermost list
         self.list_stack: list[bool] = []
         self.list_id: str | None = None
@@ -188,14 +199,15 @@ class _Builder(HTMLParser):
     def _append_text(self, s: str) -> None:
         self.buf.append(s)
         self.buf_marks.append(tuple(self.mark_stack))
+        self.buf_links.append(self.link_stack[-1] if self.link_stack else None)
 
     # -- text buffer ----------------------------------------------------------
 
     def _flush(self) -> None:
-        runs = _collapse_ws_runs(self.buf, self.buf_marks)
+        runs = _collapse_ws_runs(self.buf, self.buf_marks, self.buf_links)
         text = "".join(r.text for r in runs)
         imgs, start, end = self.pending, self.buf_start, self.buf_end
-        self.buf, self.buf_marks, self.pending = [], [], []
+        self.buf, self.buf_marks, self.buf_links, self.pending = [], [], [], []
         self.buf_start, self.buf_end = None, None
         meta = self._list_meta()
         if self.heading_level and _has_text(text):
@@ -233,12 +245,23 @@ class _Builder(HTMLParser):
         if tag in _INLINE_MARKS:
             self.mark_stack.append(_INLINE_MARKS[tag])
             return
+        if tag == "a":
+            # a link is not a mark (it carries a URL); tracked on its own stack
+            self.link_stack.append(a.get("href") or None)
+            return
         if tag == "pre":
             self._flush()
             self.in_pre = True
             self.pre_buf = []
+            m = _CODE_LANG.search(a.get("class") or "")
+            self.pre_lang = m.group(1) if m else None
             self.pre_start = (self._byte(self.getpos())
                               + len((self.get_starttag_text() or "").encode("utf-8")))
+            return
+        if tag == "code" and self.in_pre:
+            if self.pre_lang is None:  # language often sits on the inner <code>
+                m = _CODE_LANG.search(a.get("class") or "")
+                self.pre_lang = m.group(1) if m else None
             return
         if tag not in _BLOCK:
             return  # inline tag: let its text accumulate
@@ -285,16 +308,21 @@ class _Builder(HTMLParser):
                     del self.mark_stack[idx]
                     break
             return
+        if tag == "a":
+            if self.link_stack:
+                self.link_stack.pop()
+            return
         if tag == "pre":
             text = "".join(self.pre_buf)
             end = self._byte(self.getpos())
             if text:
-                self.blocks.append(ParagraphBlock(
+                self.blocks.append(CodeBlock(
                     id=self._next_id(),
                     span=Span(byte_start=self.pre_start, byte_end=end),
-                    text=text, **self._list_meta()))
+                    text=text, language=self.pre_lang, **self._list_meta()))
             self.in_pre = False
             self.pre_buf = []
+            self.pre_lang = None
             return
         if tag not in _BLOCK:
             return

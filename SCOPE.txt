@@ -25,14 +25,16 @@ read cell formatting.
 
 html
 ----
-Reads headings, paragraphs, lists, tables (including nested tables and in-cell images), and
-bold/italic/underline/strikethrough formatting; preserves `<pre>` content verbatim. Does not
-yet read formatting inside table cells.
+Reads headings, paragraphs, lists, tables (including nested tables and in-cell images),
+bold/italic/underline/strikethrough formatting, super/subscript, links (`<a href>`), and
+`<pre>` as a code block (verbatim, with a `language-x`/`lang-x` class as the language hint).
+Does not yet read formatting/links inside table cells.
 
 markdown
 --------
-Reads headings (ATX and setext), lists, tables, images, and bold/italic/strikethrough
-formatting. Does not yet read blockquotes (`>`), reference links, or inline HTML.
+Reads headings (ATX and setext), lists, tables, images, fenced code blocks (with the
+fence's language hint), inline links (`[text](url)`), and bold/italic/strikethrough
+formatting. Does not yet read blockquotes (`>`), reference-style links, or inline HTML.
 
 pdf
 ---
@@ -57,5 +59,12 @@ image's own record. Does not resolve remote (http/https) image addresses.
 tables/: implemented, generates table descriptions. With the optional `tables/structure/`, can
 read the table grid (cell bbox/rowspan/colspan) from a separate model (VLM, TableFormer, or an
 http service — `TABLE_STRUCT_PROVIDER`); falls back to geometric table detection if not
-configured.
+configured. `TABLE_STRUCT_PROVIDER=tableformer`: groundwork is in, but out of scope for now —
+untested against real inference (no confirmation yet of the coordinate origin the model expects),
+so treat it as experimental until verified.
+render/: renders the IR back to Markdown (`render.markdown.to_markdown`; CLI:
+`scripts/to_markdown.py`). Emits plain GitHub-flavored Markdown where it suffices and
+inline HTML only where Markdown cannot represent the content (merged/nested table cells
+-> `<table>`; underline -> `<u>`; super/subscript -> the unicode char when one exists,
+else `<sup>`/`<sub>`). Lists are reconstructed from the flat block stream.
 webapp/: not yet implemented.

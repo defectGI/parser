@@ -60,7 +60,52 @@ from typing import Any
 # cell serialized as a plain string) — see `_cell_from_dict`.
 # v3: `Block.heading_path` added (ancestor heading texts). Absent/None on a block
 # reads the same as "not populated by this parser yet" — no migration needed.
-IR_VERSION = 3
+# v4: `CodeBlock` (BlockType.CODE) added — verbatim code with an optional language
+# hint, instead of code degrading to a ParagraphBlock. `InlineRun.link` added — an
+# optional hyperlink target on a run; absent reads as "no link". Both are additive
+# for existing data (no v1-v3 file contains them); a reader older than v4 will not
+# recognize the "code" block type, so only forward migration is a concern.
+IR_VERSION = 4
+
+
+class IRParseError(ValueError):
+    """A serialized IR dict is malformed at a known location.
+
+    `path` points at the offending spot (e.g. ``blocks[3].type``) so a corrupt
+    parser output fails loudly *at the boundary* — naming where — instead of
+    letting a missing field leak inward as a silent None and surface far away in
+    a later stage. Optional fields that a parser simply hasn't populated stay
+    None and are NOT errors; only genuinely required fields raise this.
+    """
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"{path}: {reason}")
+
+
+def migrate_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """Bring a serialized IR dict from its stored `ir_version` up to the current
+    `IR_VERSION` — a pure dict->dict step run BEFORE validation/typing, so version
+    handling lives in one place rather than smeared through each `from_dict`.
+
+    Today every v1..v4 difference is additive or read tolerantly at parse time (a
+    v1 table cell is a bare string; see `_cell_from_dict`), so there is no field
+    rewriting to do yet — this is the version gate and the seam for a future
+    breaking migration. It never accepts a file newer than this reader.
+    """
+    if not isinstance(data, dict):
+        raise IRParseError("<root>", f"expected an object, got {type(data).__name__}")
+    v = data.get("ir_version", IR_VERSION)
+    if not isinstance(v, int):
+        raise IRParseError("ir_version", f"expected an int, got {v!r}")
+    if v > IR_VERSION:
+        raise IRParseError(
+            "ir_version",
+            f"file is IR v{v}, this reader supports up to v{IR_VERSION}")
+    # Future breaking migrations plug in here, oldest first:
+    #   if v < 5: data = _migrate_v4_to_v5(data)
+    return data
 
 
 class BlockType(str, Enum):
@@ -70,6 +115,7 @@ class BlockType(str, Enum):
     PARAGRAPH = "paragraph"
     TABLE = "table"
     IMAGE = "image"
+    CODE = "code"
 
 
 # ---------------------------------------------------------------------------
@@ -199,45 +245,57 @@ class Mark(str, Enum):
 
 @dataclass
 class InlineRun:
-    """A maximal text span sharing the same set of active marks.
+    """A maximal text span sharing the same set of active marks (and link).
 
     A text block keeps its plain `text` as the canonical view (unchanged for every
     text-only consumer); `runs` is an *optional* parallel detail whose concatenated
-    text equals `text`. A run with no marks is just unstyled text.
+    text equals `text`. A run with no marks and no link is just unstyled text.
+
+    link
+        Optional hyperlink target the run's `text` points at (e.g. an `<a href>`
+        or a markdown `[text](url)`). None => the run is not a link. The visible
+        text stays in `text`, so text-only consumers are unaffected; only the
+        destination is carried here.
     """
 
     text: str
     marks: tuple[Mark, ...] = ()
+    link: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"text": self.text, "marks": [m.value for m in self.marks]}
+        d: dict[str, Any] = {"text": self.text, "marks": [m.value for m in self.marks]}
+        if self.link:
+            d["link"] = self.link
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "InlineRun":
         return cls(text=data.get("text", ""),
-                   marks=tuple(Mark(m) for m in data.get("marks", [])))
+                   marks=tuple(Mark(m) for m in data.get("marks", [])),
+                   link=data.get("link"))
 
 
 def runs_have_marks(runs: list[InlineRun]) -> bool:
-    """True if any run carries formatting (else `runs` is redundant with `text`)."""
-    return any(r.marks for r in runs)
+    """True if any run carries non-redundant detail — a mark or a link (else
+    `runs` is fully reconstructable from `text` and not worth storing)."""
+    return any(r.marks or r.link for r in runs)
 
 
 def finalize_runs(runs: list[InlineRun]) -> list[InlineRun]:
-    """Merge adjacent runs with identical marks, drop empties, and strip the
-    leading/trailing whitespace of the whole sequence so that
+    """Merge adjacent runs with identical marks *and* link, drop empties, and strip
+    the leading/trailing whitespace of the whole sequence so that
     `"".join(r.text for r in result)` equals the block's stripped plain text."""
     merged: list[InlineRun] = []
     for r in runs:
         if not r.text:
             continue
-        if merged and merged[-1].marks == r.marks:
-            merged[-1] = InlineRun(merged[-1].text + r.text, r.marks)
+        if merged and merged[-1].marks == r.marks and merged[-1].link == r.link:
+            merged[-1] = InlineRun(merged[-1].text + r.text, r.marks, r.link)
         else:
-            merged.append(InlineRun(r.text, r.marks))
+            merged.append(InlineRun(r.text, r.marks, r.link))
     if merged:
-        merged[0] = InlineRun(merged[0].text.lstrip(), merged[0].marks)
-        merged[-1] = InlineRun(merged[-1].text.rstrip(), merged[-1].marks)
+        merged[0] = InlineRun(merged[0].text.lstrip(), merged[0].marks, merged[0].link)
+        merged[-1] = InlineRun(merged[-1].text.rstrip(), merged[-1].marks, merged[-1].link)
         merged = [r for r in merged if r.text]
     return merged
 
@@ -329,10 +387,26 @@ class Block:
         raise NotImplementedError
 
     @staticmethod
-    def from_dict(data: dict[str, Any]) -> "Block":
-        btype = BlockType(data["type"])
+    def from_dict(data: dict[str, Any], path: str = "block") -> "Block":
+        if not isinstance(data, dict):
+            raise IRParseError(path, f"expected an object, got {type(data).__name__}")
+        if "type" not in data:
+            raise IRParseError(path, "required field 'type' missing")
+        try:
+            btype = BlockType(data["type"])
+        except ValueError as e:
+            raise IRParseError(f"{path}.type",
+                               f"unknown block type {data['type']!r}") from e
         cls = _BLOCK_CLASSES[btype]
-        return cls._from_dict(data)
+        try:
+            return cls._from_dict(data)
+        except IRParseError:
+            raise
+        except (KeyError, ValueError, TypeError) as e:
+            # a required field was missing/ill-typed inside this block
+            reason = (f"required field {e.args[0]!r} missing"
+                      if isinstance(e, KeyError) else str(e))
+            raise IRParseError(path, reason) from e
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> "Block":  # pragma: no cover
@@ -404,6 +478,35 @@ class ParagraphBlock(Block):
     def _from_dict(cls, data: dict[str, Any]) -> "ParagraphBlock":
         return cls(**cls._base_kwargs(data), text=data.get("text", ""),
                    runs=[InlineRun.from_dict(r) for r in data.get("runs", [])])
+
+
+@dataclass
+class CodeBlock(Block):
+    """A verbatim code block (fenced code, `<pre>`/`<code>`, ...).
+
+    `text` is the raw code exactly as written — it is NEVER run through inline
+    formatting (`runs`), because inside code `*` / `_` / `#` are literal characters,
+    not markup. `language` is an optional hint when the source names it (a markdown
+    fence info string ```` ```python ````, an html `<code class="language-x">`); None
+    when unknown. A consumer renders this as a fenced block rather than a paragraph,
+    which is why it is a distinct block type instead of a ParagraphBlock.
+    """
+
+    text: str = ""
+    language: str | None = None
+
+    type: BlockType = field(init=False, default=BlockType.CODE)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = {**self._base_dict(), "text": self.text}
+        if self.language:
+            d["language"] = self.language
+        return d
+
+    @classmethod
+    def _from_dict(cls, data: dict[str, Any]) -> "CodeBlock":
+        return cls(**cls._base_kwargs(data), text=data.get("text", ""),
+                   language=data.get("language"))
 
 
 @dataclass
@@ -499,6 +602,7 @@ class ImageBlock(Block):
 _BLOCK_CLASSES: dict[BlockType, type[Block]] = {
     BlockType.HEADING: HeadingBlock,
     BlockType.PARAGRAPH: ParagraphBlock,
+    BlockType.CODE: CodeBlock,
     BlockType.TABLE: TableBlock,
     BlockType.IMAGE: ImageBlock,
 }
@@ -692,6 +796,19 @@ class ParsedDocument:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ParsedDocument":
+        """Validate + type a serialized IR dict. Raises `IRParseError` (naming the
+        offending path) if a required field is missing/ill-typed, rather than
+        letting a None leak inward. Call `migrate_dict` first for a versioned file
+        (`from_json`/`load` do this already)."""
+        if not isinstance(data, dict):
+            raise IRParseError("<root>",
+                               f"expected an object, got {type(data).__name__}")
+        for key in ("doc_id", "source_path", "fmt"):
+            if key not in data:
+                raise IRParseError("<root>", f"required field {key!r} missing")
+        raw_blocks = data.get("blocks", [])
+        if not isinstance(raw_blocks, list):
+            raise IRParseError("blocks", "expected a list")
         return cls(
             doc_id=data["doc_id"],
             source_path=data["source_path"],
@@ -703,7 +820,8 @@ class ParsedDocument:
             parser_version=data.get("parser_version"),
             ir_version=data.get("ir_version", IR_VERSION),
             metadata=data.get("metadata", {}),
-            blocks=[Block.from_dict(b) for b in data.get("blocks", [])],
+            blocks=[Block.from_dict(b, f"blocks[{i}]")
+                    for i, b in enumerate(raw_blocks)],
         )
 
     def to_json(self, *, indent: int = 2) -> str:
@@ -711,7 +829,7 @@ class ParsedDocument:
 
     @classmethod
     def from_json(cls, text: str) -> "ParsedDocument":
-        return cls.from_dict(json.loads(text))
+        return cls.from_dict(migrate_dict(json.loads(text)))
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)

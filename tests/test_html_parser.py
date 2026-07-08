@@ -6,7 +6,7 @@ parsers/README.md).
 from __future__ import annotations
 
 from parsers.base import (
-    HeadingBlock, ImageBlock, Mark, ParagraphBlock, TableBlock,
+    CodeBlock, HeadingBlock, ImageBlock, Mark, ParagraphBlock, TableBlock,
 )
 from parsers.html_parser import HtmlParser
 
@@ -64,13 +64,42 @@ def test_superscript_subscript(tmp_path):
     assert ("2", (Mark.SUBSCRIPT,)) in marks
 
 
-# --- <pre> --------------------------------------------------------------------
+# --- <pre> -> CodeBlock -------------------------------------------------------
 
 
-def test_pre_preserves_whitespace(tmp_path):
+def test_pre_preserves_whitespace_as_code_block(tmp_path):
     doc = _parse(tmp_path, "<pre>line1\n    line2   indented\nline3</pre>")
+    c = next(b for b in doc.blocks if isinstance(b, CodeBlock))
+    assert c.text == "line1\n    line2   indented\nline3"
+    assert c.language is None
+
+
+def test_pre_code_language_hint(tmp_path):
+    doc = _parse(tmp_path,
+                 '<pre><code class="language-python">x = 1</code></pre>')
+    c = next(b for b in doc.blocks if isinstance(b, CodeBlock))
+    assert c.text == "x = 1"
+    assert c.language == "python"
+
+
+# --- a[href] -> link runs -----------------------------------------------------
+
+
+def test_anchor_becomes_link_run(tmp_path):
+    doc = _parse(tmp_path, '<p>see the <a href="https://e.com/x">docs</a> now</p>')
     p = next(b for b in doc.blocks if isinstance(b, ParagraphBlock))
-    assert p.text == "line1\n    line2   indented\nline3"
+    assert p.text == "see the docs now"
+    assert "".join(r.text for r in p.runs) == p.text
+    link = next(r for r in p.runs if r.link)
+    assert (link.text, link.link) == ("docs", "https://e.com/x")
+
+
+def test_link_with_inline_mark(tmp_path):
+    doc = _parse(tmp_path, '<p><a href="u"><b>bold link</b></a></p>')
+    p = next(b for b in doc.blocks if isinstance(b, ParagraphBlock))
+    run = next(r for r in p.runs if r.link)
+    assert run.link == "u"
+    assert Mark.BOLD in run.marks
 
 
 # --- table cells: nested table + image preserved as real blocks --------------

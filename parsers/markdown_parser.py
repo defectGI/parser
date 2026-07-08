@@ -8,12 +8,15 @@ Supported constructs (phase 1 scope, GFM-ish):
 * ATX headings (`#`..`######`) and setext headings (a single text line followed
   by a `===`/`---` underline; a multi-line setext heading text is not detected —
   it falls back to a plain paragraph, same as before)
-* fenced code blocks (``` / ~~~) — kept as a paragraph, so `#`/`|` inside code
-  are not misread as headings/tables
+* fenced code blocks (``` / ~~~) -> `CodeBlock`; the info string after the opening
+  fence (```` ```python ````) becomes `language`, and `#`/`|` inside code are not
+  misread as headings/tables (the fence lines are not kept in the code text)
 * pipe tables (header + `---` separator + rows) -> TableBlock; cells may escape
   a literal pipe as `\\|` and may contain `![alt](src)` images
 * lists (`-`/`*`/`+`/`1.`/`1)`), nested by indent -> blocks carrying list_* metadata
 * images `![alt](src)` -> `<imageN>` marker in text + a real ImageBlock
+* inline links `[text](url)` -> a run carrying `link=url` (see base.py's InlineRun);
+  the visible `text` stays in the block text. `![alt](src)` is an image, not a link.
 * inline emphasis -> `runs` (see base.py's Mark/InlineRun): `**bold**`/`__bold__`,
   `*italic*`, `***bold+italic***`/`___bold+italic___`, `~~strike~~`. Deliberately
   NOT nested (a bold span's own content is not re-scanned for italic inside it)
@@ -36,7 +39,7 @@ from pathlib import Path
 
 from .base import (
     BaseParser, ParsedDocument, Span, Cell, text_cell,
-    HeadingBlock, ParagraphBlock, TableBlock, ImageBlock, TableData,
+    HeadingBlock, ParagraphBlock, CodeBlock, TableBlock, ImageBlock, TableData,
     Mark, InlineRun, finalize_runs, runs_have_marks,
 )
 
@@ -49,14 +52,19 @@ _MARKER = re.compile(r"<image\d+>")
 _FENCE = ("```", "~~~")
 _ESCAPED_PIPE = "\x00ESCPIPE\x00"
 
-# Lightweight, non-nested inline emphasis. Named-group backreferences
-# (`(?P=name)`) tie each delimiter to its own closing match; only the winning
-# alternative's groups are non-None on a given match.
+# Lightweight, non-nested inline emphasis + inline links. Named-group
+# backreferences (`(?P=name)`) tie each delimiter to its own closing match; only
+# the winning alternative's groups are non-None on a given match. The link
+# alternative `[text](url)` requires no preceding `!` so it never swallows an
+# image (`![alt](src)` is resolved to an `<imageN>` marker before this runs); its
+# `text` is kept verbatim (emphasis inside link text is not re-scanned, matching
+# the no-nesting policy).
 _EMPH = re.compile(
     r"(?P<bi>\*\*\*|___)(?P<bi_txt>.+?)(?P=bi)"
     r"|(?P<b>\*\*|__)(?P<b_txt>.+?)(?P=b)"
     r"|(?P<i>\*)(?P<i_txt>[^\s*](?:.*?[^\s*])?)(?P=i)"
-    r"|(?P<st>~~)(?P<st_txt>.+?)(?P=st)",
+    r"|(?P<st>~~)(?P<st_txt>.+?)(?P=st)"
+    r"|(?<!\!)\[(?P<lk_txt>[^\]]+)\]\(\s*(?P<lk_url>[^)\s]+)(?:\s+\"[^\"]*\")?\s*\)",
     re.DOTALL,
 )
 
@@ -82,8 +90,10 @@ def _parse_inline(text: str) -> tuple[str, list[InlineRun]]:
             runs.append(InlineRun(m.group("b_txt"), (Mark.BOLD,)))
         elif m.group("i") is not None:
             runs.append(InlineRun(m.group("i_txt"), (Mark.ITALIC,)))
-        else:
+        elif m.group("st") is not None:
             runs.append(InlineRun(m.group("st_txt"), (Mark.STRIKE,)))
+        else:
+            runs.append(InlineRun(m.group("lk_txt"), (), m.group("lk_url")))
         pos = m.end()
     if pos < len(text):
         runs.append(InlineRun(text[pos:]))
@@ -227,20 +237,20 @@ class MarkdownParser(BaseParser):
             # --- fenced code block ---
             if stripped.startswith(_FENCE):
                 fence = stripped[:3]
-                code = [text]
+                language = stripped[3:].strip() or None  # info string after the fence
+                code: list[str] = []  # inner lines only; fences are not content
                 j = i + 1
                 while j < n and not lines[j][2].strip().startswith(fence):
                     code.append(lines[j][2])
                     j += 1
                 if j < n:  # closing fence
-                    code.append(lines[j][2])
                     blk_end = lines[j][1]
                     j += 1
                 else:
                     blk_end = end
-                blocks.append(ParagraphBlock(
+                blocks.append(CodeBlock(
                     id=next_id(), span=Span(byte_start=start, byte_end=blk_end),
-                    text="\n".join(code)))
+                    text="\n".join(code), language=language))
                 i = j
                 continue
 

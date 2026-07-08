@@ -4,7 +4,10 @@ and inline bold/italic/strike -> runs (see parsers/README.md).
 
 from __future__ import annotations
 
-from parsers.base import HeadingBlock, ImageBlock, Mark, ParagraphBlock, TableBlock
+from parsers.base import (
+    CodeBlock, HeadingBlock, ImageBlock, Mark, ParagraphBlock, ParsedDocument,
+    TableBlock,
+)
 from parsers.markdown_parser import MarkdownParser
 
 
@@ -111,3 +114,51 @@ def test_table_cell_bold_runs(tmp_path):
     cell = table.table.cells[1][0]
     assert cell.plain_text() == "bold cell"
     assert any(Mark.BOLD in r.marks for r in cell.blocks[0].runs)
+
+
+# --- fenced code blocks -------------------------------------------------------
+
+
+def test_fenced_code_block_with_language(tmp_path):
+    doc = _parse(tmp_path, "```python\nx = 3 * 4\n# not a heading\n```\n")
+    code = next(b for b in doc.blocks if isinstance(b, CodeBlock))
+    # inner code only (fences dropped), and `#`/`*` inside are literal, not markup
+    assert code.text == "x = 3 * 4\n# not a heading"
+    assert code.language == "python"
+    assert not any(isinstance(b, HeadingBlock) for b in doc.blocks)
+
+
+def test_fenced_code_block_without_language(tmp_path):
+    doc = _parse(tmp_path, "```\nplain\n```\n")
+    code = next(b for b in doc.blocks if isinstance(b, CodeBlock))
+    assert code.text == "plain"
+    assert code.language is None
+
+
+# --- inline links -------------------------------------------------------------
+
+
+def test_inline_link_run(tmp_path):
+    doc = _parse(tmp_path, "see the [docs](https://example.com/x) here")
+    p = next(b for b in doc.blocks if isinstance(b, ParagraphBlock))
+    assert p.text == "see the docs here"  # visible text only, no brackets/url
+    assert "".join(r.text for r in p.runs) == p.text
+    link = next(r for r in p.runs if r.link)
+    assert (link.text, link.link) == ("docs", "https://example.com/x")
+
+
+def test_image_not_parsed_as_link(tmp_path):
+    # `![alt](src)` must stay an image (ImageBlock), never a hyperlink run
+    doc = _parse(tmp_path, "![alt](pic.png)\n")
+    assert any(isinstance(b, ImageBlock) for b in doc.blocks)
+    assert not any(
+        r.link for b in doc.blocks if isinstance(b, ParagraphBlock) for r in b.runs)
+
+
+def test_code_and_link_survive_json_roundtrip(tmp_path):
+    doc = _parse(tmp_path, "a [x](http://y) b\n\n```js\nvar a=1;\n```\n")
+    back = ParsedDocument.from_json(doc.to_json())
+    code = next(b for b in back.blocks if isinstance(b, CodeBlock))
+    assert (code.text, code.language) == ("var a=1;", "js")
+    para = next(b for b in back.blocks if isinstance(b, ParagraphBlock))
+    assert any(r.link == "http://y" and r.text == "x" for r in para.runs)
